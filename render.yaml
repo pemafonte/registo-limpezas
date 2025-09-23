@@ -3,7 +3,7 @@ services:
     name: registo-limpezas
     env: python
     runtime: python-3.10.12
-    buildCommand: "pip install -r requirements_render.txt"
+    buildCommand: "pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements_render.txt"
     startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
     plan: free
     envVars:
