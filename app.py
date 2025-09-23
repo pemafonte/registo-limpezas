@@ -2948,7 +2948,7 @@ def admin_role_new():
     return render_template("admin_role_form.html", perms=KNOWN_PERMS, signature=APP_SIGNATURE)
 
 # ...existing code...
-import pandas as pd
+from pandas_config import PANDAS_AVAILABLE, pd
 import io
 @app.route("/admin/alterar_regiao_viatura", methods=["GET", "POST"])
 @login_required
