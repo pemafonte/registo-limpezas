@@ -1,3 +1,5 @@
+# AppFlaskLimpeza.py
+
 from __future__ import annotations
 import os, json, io, csv
 from pathlib import Path
@@ -3495,6 +3497,23 @@ def export_registos_excel():
         df_protocolos.to_excel(writer, index=False, sheet_name="Protocolos")
 
     return send_file(fname, as_attachment=True)
+# -----------------------------------------------------------------------------
+# Arrancar
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+# ---- Extensões de esquema (idempotentes) ----
+
+
+
+@app.before_request
+def force_login():
+    public_endpoints = {"login", "static", "sem_permissao"}
+    ep = request.endpoint or ""
+    if ep.split(".")[0] in {"static"} or ep in public_endpoints:
+        return
+    if not session.get("user_id"):
+        return redirect(url_for("login", next=request.path))
+
+
