@@ -810,32 +810,52 @@ except Exception as e:
 # Esquema / seed
 # -----------------------------------------------------------------------------
 def ensure_schema_on_boot():
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    # Definir sintaxe correta baseado no tipo de banco
-    if is_postgres(conn):
-        id_field = "id SERIAL PRIMARY KEY"
-        text_type = "TEXT"
-        timestamp_default = "CURRENT_TIMESTAMP"
-    else:
-        id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
-        text_type = "TEXT"  
-        timestamp_default = "CURRENT_TIMESTAMP"
+    print("DEBUG: Iniciando ensure_schema_on_boot()")
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        print("DEBUG: Conexão estabelecida para schema")
+        
+        # Definir sintaxe correta baseado no tipo de banco
+        if is_postgres(conn):
+            id_field = "id SERIAL PRIMARY KEY"
+            text_type = "TEXT"
+            timestamp_default = "CURRENT_TIMESTAMP"
+            print("DEBUG: Usando sintaxe PostgreSQL")
+        else:
+            id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
+            text_type = "TEXT"  
+            timestamp_default = "CURRENT_TIMESTAMP"
+            print("DEBUG: Usando sintaxe SQLite")
+    except Exception as e:
+        print(f"ERRO CRÍTICO em ensure_schema_on_boot() - conexão: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
     # Tabelas principais
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS viaturas (
-            {id_field},
-            matricula TEXT NOT NULL UNIQUE,
-            descricao TEXT,
-            filial TEXT,
-            num_frota TEXT,
-            ativo INTEGER DEFAULT 1,
-            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute(f"""
+    try:
+        print("DEBUG: Criando tabela viaturas...")
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS viaturas (
+                {id_field},
+                matricula TEXT NOT NULL UNIQUE,
+                descricao TEXT,
+                filial TEXT,
+                num_frota TEXT,
+                ativo INTEGER DEFAULT 1,
+                criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        print("DEBUG: Tabela viaturas criada com sucesso")
+    except Exception as e:
+        print(f"ERRO ao criar tabela viaturas: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    try:
+        print("DEBUG: Criando tabela protocolos...")
+        cur.execute(f"""
         CREATE TABLE IF NOT EXISTS protocolos (
             {id_field},
             nome TEXT NOT NULL UNIQUE,
@@ -845,20 +865,33 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+        print("DEBUG: Tabela protocolos criada com sucesso")
+    except Exception as e:
+        print(f"ERRO ao criar tabela protocolos: {e}")
+        import traceback
+        traceback.print_exc()
+    
     # Criar funcionarios ANTES de registos_limpeza (para foreign key)
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS funcionarios (
-            {id_field},
-            username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL,
-            nome TEXT,
-            role TEXT DEFAULT 'leitura',
-            email TEXT,
-            ativo INTEGER DEFAULT 1,
-            regiao TEXT,
-            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    try:
+        print("DEBUG: Criando tabela funcionarios...")
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS funcionarios (
+                {id_field},
+                username TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                nome TEXT,
+                role TEXT DEFAULT 'leitura',
+                email TEXT,
+                ativo INTEGER DEFAULT 1,
+                regiao TEXT,
+                criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        print("DEBUG: Tabela funcionarios criada com sucesso")
+    except Exception as e:
+        print(f"ERRO ao criar tabela funcionarios: {e}")
+        import traceback
+        traceback.print_exc()
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS registos_limpeza (
             {id_field},
@@ -1148,12 +1181,15 @@ def ensure_schema_on_boot():
         conn.commit()
         conn.close()
 
+print("DEBUG: Chamando ensure_schema_on_boot()...")
 try:
     ensure_schema_on_boot()
+    print("DEBUG: ensure_schema_on_boot() concluída com sucesso")
 except Exception as e:
-    print(f"ERRO na inicialização do schema: {e}")
+    print(f"ERRO CRÍTICO na inicialização do schema: {e}")
     import traceback
     traceback.print_exc()
+    print("ATENÇÃO: Schema não foi inicializado - aplicação pode falhar")
 
 # -----------------------------------------------------------------------------
 def ensure_destinatario_id():
