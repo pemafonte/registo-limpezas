@@ -637,6 +637,21 @@ def is_postgres(conn):
 def sql_placeholder(conn):
     return "%s" if is_postgres(conn) else "?"
 
+def sql_datetime(conn, field):
+    """Helper para função datetime() compatível com PostgreSQL e SQLite"""
+    if is_postgres(conn):
+        return f"({field})::timestamp"  # PostgreSQL: cast to timestamp
+    else:
+        return f"datetime({field})"  # SQLite: função datetime()
+
+def fix_datetime_in_sql(conn, sql):
+    """Substitui datetime() por sintaxe compatível baseada no tipo de banco"""
+    if is_postgres(conn):
+        import re
+        # Substitui datetime(campo) por (campo)::timestamp
+        return re.sub(r'datetime\(([^)]+)\)', r'(\1)::timestamp', sql)
+    return sql
+
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
 
@@ -1551,8 +1566,9 @@ def home():
         dt_7days = ">= date('now','-6 days','localtime')"
 
     # Última limpeza por viatura/protocolo (filtrada por região)
-    last_map_sql = """
-        SELECT r.viatura_id, r.protocolo_id, MAX(datetime(r.data_hora)) AS ult
+    datetime_func = sql_datetime(conn, "r.data_hora")
+    last_map_sql = f"""
+        SELECT r.viatura_id, r.protocolo_id, MAX({datetime_func}) AS ult
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
         WHERE 1=1
@@ -1566,8 +1582,8 @@ def home():
     last_map = {(r["viatura_id"], r["protocolo_id"]): r["ult"] for r in cur.fetchall()}
 
     # Última (qualquer) por viatura (filtrada por região)
-    last_any_sql = """
-        SELECT v.id as viatura_id, MAX(datetime(r.data_hora)) AS ult
+    last_any_sql = f"""
+        SELECT v.id as viatura_id, MAX({datetime_func}) AS ult
         FROM viaturas v
         LEFT JOIN registos_limpeza r ON v.id = r.viatura_id
         WHERE v.ativo=1
@@ -2125,14 +2141,16 @@ def viaturas():
     if f_filial:
         where.append(f"COALESCE(v.filial,'') = {ph}"); params.append(f_filial)
 
+    datetime_func = sql_datetime(conn, "data_hora")
+    datetime_func_r = sql_datetime(conn, "r.data_hora")
     cur.execute(f"""
         WITH last AS (
           SELECT r.*
           FROM registos_limpeza r
           JOIN (
-            SELECT viatura_id, MAX(datetime(data_hora)) AS ult
+            SELECT viatura_id, MAX({datetime_func}) AS ult
             FROM registos_limpeza GROUP BY viatura_id
-          ) m ON m.viatura_id=r.viatura_id AND datetime(r.data_hora)=m.ult
+          ) m ON m.viatura_id=r.viatura_id AND {datetime_func_r}=m.ult
         ),
         verificados AS (
           SELECT viatura_id, COUNT(*) AS n
@@ -3024,7 +3042,7 @@ def pedido_autorizado_hoje(viatura_id, funcionario_id):
 def registos_em_progresso():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+    query = """
         SELECT r.id as registo_id, r.data_hora, v.matricula, v.num_frota,
                p.nome as protocolo, f.nome as funcionario, r.local, r.hora_inicio
         FROM registos_limpeza r
@@ -3033,7 +3051,8 @@ def registos_em_progresso():
         JOIN funcionarios f ON f.id = r.funcionario_id
         WHERE r.estado='em_progresso' AND (r.hora_fim IS NULL OR r.hora_fim='')
         ORDER BY datetime(r.data_hora) DESC, r.id DESC
-    """)
+    """
+    cur.execute(fix_datetime_in_sql(conn, query))
     registos = [dict(row) for row in cur.fetchall()]
     conn.close()
     return render_template("registos_em_progresso.html", registos=registos, signature=APP_SIGNATURE)
