@@ -1178,8 +1178,10 @@ def ensure_schema_on_boot():
         cur.execute("UPDATE protocolos SET frequencia_dias=7  WHERE frequencia_dias IS NULL AND nome LIKE 'Interior%'")
         cur.execute("UPDATE protocolos SET frequencia_dias=14 WHERE frequencia_dias IS NULL AND nome LIKE 'Exterior%'")
 
-        conn.commit()
-        conn.close()
+    print("DEBUG: Fazendo commit das tabelas criadas...")
+    conn.commit()
+    conn.close()
+    print("DEBUG: ensure_schema_on_boot() finalizada - tabelas commitadas")
 
 print("DEBUG: Chamando ensure_schema_on_boot()...")
 try:
@@ -3931,9 +3933,26 @@ if __name__ == "__main__":
 
 
 
+# Flag para evitar múltiplas inicializações
+_schema_initialized = False
+
+@app.before_request
+def ensure_database_ready():
+    global _schema_initialized
+    if not _schema_initialized:
+        print("DEBUG: Inicializando schema no primeiro request...")
+        try:
+            ensure_schema_on_boot()
+            print("DEBUG: Schema inicializado com sucesso!")
+            _schema_initialized = True
+        except Exception as e:
+            print(f"ERRO CRÍTICO na inicialização do schema via before_request: {e}")
+            import traceback
+            traceback.print_exc()
+
 @app.before_request
 def force_login():
-    public_endpoints = {"login", "static", "sem_permissao"}
+    public_endpoints = {"login", "static", "sem_permissao", "debug"}
     ep = request.endpoint or ""
     if ep.split(".")[0] in {"static"} or ep in public_endpoints:
         return
