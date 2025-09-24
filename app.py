@@ -869,16 +869,20 @@ def ensure_schema_on_boot():
     """)
 
     # Seeds
-    cur.execute("SELECT COUNT(*) FROM funcionarios WHERE username='admin'")
-    if cur.fetchone()[0] == 0:
+    cur.execute("SELECT COUNT(*) as count FROM funcionarios WHERE username='admin'")
+    result = cur.fetchone()
+    count = result['count'] if isinstance(result, dict) else result[0]
+    if count == 0:
+        placeholder = sql_placeholder(conn)
         cur.execute(
-            "INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES (?,?,?,?,1)",
+            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
             ("admin", generate_password_hash("1234"), "Administrador", "admin")
         )
     cur.execute("SELECT 1 FROM funcionarios WHERE username='Pedro.fonte'")
     if not cur.fetchone():
+        placeholder = sql_placeholder(conn)
         cur.execute(
-            "INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES (?,?,?,?,1)",
+            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
             ("Pedro.fonte", generate_password_hash("1234"), "Pedro Fonte", "admin")
         )
     cur.execute("""
@@ -887,24 +891,34 @@ def ensure_schema_on_boot():
          WHERE role IS NULL OR TRIM(LOWER(role)) NOT IN ('admin','gestor','operador','leitura')
     """)
 
-    cur.execute("SELECT COUNT(*) FROM viaturas")
-    if cur.fetchone()[0] == 0:
-        cur.executemany(
-            "INSERT INTO viaturas (matricula, descricao, filial, num_frota, ativo) VALUES (?,?,?,?,1)",
-            [
-                ("AA-00-AA", "Autocarro Urbano", "Sede", "101"),
-                ("BB-11-BB", "Autocarro Suburbano", "Filial Norte", "102"),
-            ]
-        )
+    cur.execute("SELECT COUNT(*) as count FROM viaturas")
+    result = cur.fetchone()
+    count = result['count'] if isinstance(result, dict) else result[0]
+    if count == 0:
+        placeholder = sql_placeholder(conn)
+        for viatura in [
+            ("AA-00-AA", "Autocarro Urbano", "Sede", "101"),
+            ("BB-11-BB", "Autocarro Suburbano", "Filial Norte", "102"),
+        ]:
+            cur.execute(
+                f"INSERT INTO viaturas (matricula, descricao, filial, num_frota, ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
+                viatura
+            )
     
     # Garantir coluna regiao em funcionarios
     try:
-        cur.execute("PRAGMA table_info(funcionarios)")
-        cols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            # PostgreSQL: verificar colunas via information_schema
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            # SQLite: usar PRAGMA
+            cur.execute("PRAGMA table_info(funcionarios)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
         if "email" not in cols:
             cur.execute("ALTER TABLE funcionarios ADD COLUMN email TEXT")
     except Exception:
-        pass
         cols = set()
     if "regiao" not in cols:
         try: cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
