@@ -917,27 +917,81 @@ def ensure_schema_on_boot():
             cols = {r["name"] for r in cur.fetchall()}
             
         if "email" not in cols:
-            cur.execute("ALTER TABLE funcionarios ADD COLUMN email TEXT")
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_email_col")
+                cur.execute("ALTER TABLE funcionarios ADD COLUMN email TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_email_col")
+            except Exception:
+                if is_postgres(conn):
+                    cur.execute("ROLLBACK TO SAVEPOINT add_email_col")
+                pass
     except Exception:
         cols = set()
     if "regiao" not in cols:
-        try: cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
-        except Exception: pass
+        try: 
+            if is_postgres(conn):
+                cur.execute("SAVEPOINT add_regiao_col")
+            cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
+            if is_postgres(conn):
+                cur.execute("RELEASE SAVEPOINT add_regiao_col")
+        except Exception: 
+            if is_postgres(conn):
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT add_regiao_col")
+                except:
+                    pass
+            pass
 
     # Garantir colunas extra em viaturas
     try:
-        cur.execute("PRAGMA table_info(viaturas)")
-        vcols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'viaturas'")
+            vcols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(viaturas)")
+            vcols = {r["name"] for r in cur.fetchall()}
         if "limpeza_validada" not in vcols:
-            cur.execute("ALTER TABLE viaturas ADD COLUMN limpeza_validada INTEGER DEFAULT 0")
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_limpeza_validada")
+                cur.execute("ALTER TABLE viaturas ADD COLUMN limpeza_validada INTEGER DEFAULT 0")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_limpeza_validada")
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_limpeza_validada")
+                    except:
+                        pass
         for col in ("regiao","operacao","marca","modelo","tipo_protocolo"):
             if col not in vcols:
                 try:
+                    if is_postgres(conn):
+                        cur.execute(f"SAVEPOINT add_{col}_col")
                     cur.execute(f"ALTER TABLE viaturas ADD COLUMN {col} TEXT")
+                    if is_postgres(conn):
+                        cur.execute(f"RELEASE SAVEPOINT add_{col}_col")
                 except Exception:
-                    pass
+                    if is_postgres(conn):
+                        try:
+                            cur.execute(f"ROLLBACK TO SAVEPOINT add_{col}_col")
+                        except:
+                            pass
         if "verificacao_limpeza" not in vcols:
-            cur.execute("ALTER TABLE viaturas ADD COLUMN verificacao_limpeza TEXT DEFAULT NULL")  
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_verificacao_col")
+                cur.execute("ALTER TABLE viaturas ADD COLUMN verificacao_limpeza TEXT DEFAULT NULL")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_verificacao_col")
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_verificacao_col")
+                    except:
+                        pass  
 
     except Exception:
         pass
@@ -985,8 +1039,8 @@ def ensure_schema_on_boot():
         cur.execute("UPDATE protocolos SET frequencia_dias=7  WHERE frequencia_dias IS NULL AND nome LIKE 'Interior%'")
         cur.execute("UPDATE protocolos SET frequencia_dias=14 WHERE frequencia_dias IS NULL AND nome LIKE 'Exterior%'")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
 
 ensure_schema_on_boot()
 
