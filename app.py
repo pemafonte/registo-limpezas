@@ -1016,24 +1016,41 @@ def ensure_schema_on_boot():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alertas_dest ON alertas(destinatario_id, lido)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alertas_viat ON alertas(viatura_id, data_hora)")
     
+    # Verificação adicional de coluna regiao (caso não tenha sido criada antes)
     try:
-        cur.execute("PRAGMA table_info(funcionarios)")
-        cols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(funcionarios)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "regiao" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_regiao_backup")
+                cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_regiao_backup")
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_regiao_backup")
+                    except:
+                        pass
     except Exception:
-        cols = set()
-    if "regiao" not in cols:
-        try:
-            cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
-        except Exception:
-            pass    
+        pass    
 
-    cur.execute("SELECT COUNT(*) FROM protocolos")
-    if cur.fetchone()[0] == 0:
+    cur.execute("SELECT COUNT(*) as count FROM protocolos")
+    result = cur.fetchone()
+    count = result['count'] if isinstance(result, dict) else result[0]
+    if count == 0:
+        placeholder = sql_placeholder(conn)
         prot1 = {"passos": ["Inspeção interior", "Aspirar", "Desinfetar superfícies", "Vidros interiores", "Check final"]}
         prot2 = {"passos": ["Inspeção exterior", "Lavagem chassis", "Vidros exteriores", "Verificar níveis", "Check final"]}
-        cur.execute("INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES (?,?,?,1)",
+        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({placeholder},{placeholder},{placeholder},1)",
                     ("Interior Standard", json.dumps(prot1, ensure_ascii=False), 7))
-        cur.execute("INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES (?,?,?,1)",
+        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({placeholder},{placeholder},{placeholder},1)",
                     ("Exterior Standard", json.dumps(prot2, ensure_ascii=False), 14))
     else:
         cur.execute("UPDATE protocolos SET frequencia_dias=7  WHERE frequencia_dias IS NULL AND nome LIKE 'Interior%'")
