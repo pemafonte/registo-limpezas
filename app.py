@@ -724,10 +724,20 @@ def ensure_schema_on_boot():
     conn = get_conn()
     cur = conn.cursor()
     
+    # Definir sintaxe correta baseado no tipo de banco
+    if is_postgres(conn):
+        id_field = "id SERIAL PRIMARY KEY"
+        text_type = "TEXT"
+        timestamp_default = "CURRENT_TIMESTAMP"
+    else:
+        id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
+        text_type = "TEXT"  
+        timestamp_default = "CURRENT_TIMESTAMP"
+    
     # Tabelas principais
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS viaturas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             matricula TEXT NOT NULL UNIQUE,
             descricao TEXT,
             filial TEXT,
@@ -736,9 +746,9 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS protocolos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             nome TEXT NOT NULL UNIQUE,
             passos_json TEXT NOT NULL,
             frequencia_dias INTEGER,
@@ -746,9 +756,9 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS registos_limpeza (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             viatura_id INTEGER NOT NULL,
             protocolo_id INTEGER NOT NULL,
             funcionario_id INTEGER NOT NULL,
@@ -767,9 +777,9 @@ def ensure_schema_on_boot():
             FOREIGN KEY (funcionario_id) REFERENCES funcionarios(id) ON DELETE RESTRICT
         )
     """)
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS anexos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             registo_id INTEGER NOT NULL,
             caminho TEXT NOT NULL,
             tipo TEXT,
@@ -778,9 +788,9 @@ def ensure_schema_on_boot():
         )
     """)
     # ...existing code...
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS funcionarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             username TEXT NOT NULL UNIQUE,
             password TEXT NOT NULL,
             nome TEXT,
@@ -791,9 +801,9 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
     )
 """)
-    cur.execute("""
+    cur.execute(f"""
     CREATE TABLE IF NOT EXISTS pedidos_autorizacao (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        {id_field},
         viatura_id INTEGER NOT NULL,
         funcionario_id INTEGER NOT NULL,
         data_pedido TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -807,8 +817,8 @@ def ensure_schema_on_boot():
 """)
 # ...existing code...
     # Perfis dinâmicos
-    cur.execute("""CREATE TABLE IF NOT EXISTS roles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cur.execute(f"""CREATE TABLE IF NOT EXISTS roles (
+        {id_field},
         name TEXT NOT NULL UNIQUE
     )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS role_permissions (
@@ -919,9 +929,9 @@ def ensure_schema_on_boot():
 
     
 
-    cur.execute("""
+    cur.execute(f"""
     CREATE TABLE IF NOT EXISTS alertas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        {id_field},
         viatura_id INTEGER NOT NULL,
         funcionario_origem_id INTEGER,
         destinatario_id INTEGER,
@@ -2282,9 +2292,14 @@ def admin_run_migrations():
     done = []
 
     # 1) Criar tabela protocolos (se não existir)
-    cur.execute("""
+    if is_postgres(conn):
+        id_field = "id SERIAL PRIMARY KEY"
+    else:
+        id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
+        
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS protocolos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {id_field},
             nome TEXT NOT NULL UNIQUE,
             ativo INTEGER NOT NULL DEFAULT 1
         );
