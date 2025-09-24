@@ -2110,7 +2110,11 @@ def ativar_desativar_viatura(viatura_id):
 @login_required
 @require_perm("viaturas:view")
 def exportar_viaturas_excel():
-    import pandas as pd
+    from pandas_config import PANDAS_AVAILABLE, pd
+    
+    if not PANDAS_AVAILABLE:
+        flash("Funcionalidade Excel não está disponível no momento.", "error")
+        return redirect(url_for("viaturas"))
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -2703,7 +2707,11 @@ def download_anexo(anexo_id: int):
 @app.route("/exportar_contabilidade_excel")
 @login_required
 def exportar_contabilidade_excel():
-    import pandas as pd
+    from pandas_config import PANDAS_AVAILABLE, pd
+    
+    if not PANDAS_AVAILABLE:
+        flash("Funcionalidade Excel não está disponível no momento.", "error")
+        return redirect(url_for("contabilidade"))
     mes = request.args.get("mes")
     protocolo_id = request.args.get("protocolo_id")
     regiao = request.args.get("regiao")
@@ -3264,7 +3272,11 @@ def registos():
 @login_required
 @require_perm("export:excel")
 def export_excel():
-    import pandas as pd
+    from pandas_config import PANDAS_AVAILABLE, pd
+    
+    if not PANDAS_AVAILABLE:
+        flash("Funcionalidade Excel não está disponível no momento.", "error")
+        return redirect(url_for("registos"))
     mes = request.args.get("mes")
     conn = get_conn()
     cur = conn.cursor()
@@ -3385,7 +3397,11 @@ def export_excel():
 @login_required
 @require_perm("export:excel")
 def export_registos_excel():
-    import pandas as pd
+    from pandas_config import PANDAS_AVAILABLE, pd
+    
+    if not PANDAS_AVAILABLE:
+        flash("Funcionalidade Excel não está disponível no momento.", "error")
+        return redirect(url_for("registos"))
     mes = request.args.get("mes")
     conn = get_conn()
     cur = conn.cursor()
