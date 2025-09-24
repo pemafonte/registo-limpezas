@@ -4,19 +4,41 @@ from __future__ import annotations
 import os, json, io, csv
 from pathlib import Path
 from datetime import datetime, date
+import sys
 
-from flask import (
-    Flask, request, render_template, redirect, url_for, session, send_from_directory, send_file, flash, Response, abort
-)
-from werkzeug.security import check_password_hash, generate_password_hash
-from werkzeug.utils import secure_filename
+print("DEBUG: Iniciando importações...")
 
-import sqlite3
+try:
+    from flask import (
+        Flask, request, render_template, redirect, url_for, session, send_from_directory, send_file, flash, Response, abort
+    )
+    print("DEBUG: Flask importado com sucesso")
+except Exception as e:
+    print(f"ERRO CRÍTICO: Falha ao importar Flask: {e}")
+    sys.exit(1)
+
+try:
+    from werkzeug.security import check_password_hash, generate_password_hash
+    from werkzeug.utils import secure_filename
+    print("DEBUG: Werkzeug importado com sucesso")
+except Exception as e:
+    print(f"ERRO CRÍTICO: Falha ao importar Werkzeug: {e}")
+    sys.exit(1)
+
+try:
+    import sqlite3
+    print("DEBUG: SQLite3 importado com sucesso")
+except Exception as e:
+    print(f"ERRO CRÍTICO: Falha ao importar SQLite3: {e}")
+    sys.exit(1)
+
 try:
     import psycopg2
     import psycopg2.extras
+    print("DEBUG: psycopg2 importado com sucesso")
 except ImportError:
     psycopg2 = None
+    print("DEBUG: psycopg2 não disponível - usando SQLite")
 
 # -----------------------------------------------------------------------------
 # Configuração
@@ -32,14 +54,22 @@ APP_SIGNATURE = "Created by Pedro Fonte"
 
 ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".pdf"}
 
+print("DEBUG: Criando aplicação Flask...")
 app = Flask(__name__)
+print("DEBUG: Flask app criado com sucesso")
+
 app.secret_key = os.environ.get("APP_SECRET_KEY", "dev-key-please-change")
+print("DEBUG: Secret key configurada")
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 EXPORT_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
+print("DEBUG: Diretórios criados com sucesso")
 
 print("### DB em uso:", DB_PATH)
+print("DEBUG: Variáveis de ambiente:")
+print(f"  DATABASE_URL: {'[DEFINIDA]' if os.environ.get('DATABASE_URL') else '[NÃO DEFINIDA]'}")
+print(f"  PORT: {os.environ.get('PORT', '5000')}")
 
 
 # -----------------------------------------------------------------------------
@@ -1324,6 +1354,21 @@ try:
     ensure_empresa_in_funcionarios()
 except Exception as e:
     print(f"ERRO em ensure_empresa_in_funcionarios: {e}")
+# Rota de teste para debug
+@app.route("/debug")
+def debug_route():
+    try:
+        db_url = os.environ.get("DATABASE_URL")
+        return f"""
+        <h1>Debug Info</h1>
+        <p>DATABASE_URL: {'[DEFINIDA]' if db_url else '[NÃO DEFINIDA]'}</p>
+        <p>psycopg2: {'Disponível' if psycopg2 else 'Não disponível'}</p>
+        <p>Python Version: {sys.version}</p>
+        <p>App funcionando!</p>
+        """
+    except Exception as e:
+        return f"Erro: {e}"
+
 # Autenticação
 # -----------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
