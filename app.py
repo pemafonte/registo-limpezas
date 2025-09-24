@@ -756,6 +756,20 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Criar funcionarios ANTES de registos_limpeza (para foreign key)
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS funcionarios (
+            {id_field},
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            nome TEXT,
+            role TEXT DEFAULT 'leitura',
+            email TEXT,
+            ativo INTEGER DEFAULT 1,
+            regiao TEXT,
+            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS registos_limpeza (
             {id_field},
@@ -788,19 +802,6 @@ def ensure_schema_on_boot():
         )
     """)
     # ...existing code...
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS funcionarios (
-            {id_field},
-            username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL,
-            nome TEXT,
-            role TEXT DEFAULT 'leitura',
-            email TEXT,
-            ativo INTEGER DEFAULT 1,
-            regiao TEXT,
-            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-""")
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS pedidos_autorizacao (
         {id_field},
