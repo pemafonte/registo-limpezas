@@ -581,15 +581,25 @@ def write_templates():
 # -----------------------------------------------------------------------------
 def get_conn():
     db_url = os.environ.get("DATABASE_URL")
-    if db_url and psycopg2:
-        # Heroku/PostgreSQL
-        conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
-        return conn
-    else:
-        # Local/SQLite
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        return conn
+    try:
+        if db_url and psycopg2:
+            # Heroku/PostgreSQL
+            print(f"DEBUG: Conectando ao PostgreSQL: {db_url[:50]}...")
+            conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
+            print("DEBUG: Conexão PostgreSQL estabelecida com sucesso")
+            return conn
+        else:
+            # Local/SQLite
+            print(f"DEBUG: Conectando ao SQLite: {DB_PATH}")
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            print("DEBUG: Conexão SQLite estabelecida com sucesso")
+            return conn
+    except Exception as e:
+        print(f"ERRO CRÍTICO na conexão com banco: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 def is_postgres(conn):
     return hasattr(conn, "server_version")  # True para psycopg2, False para sqlite3
@@ -720,7 +730,10 @@ def ensure_custo_limpeza_in_protocolos():
     finally:
         conn.close()
 
-ensure_custo_limpeza_in_protocolos()
+try:
+    ensure_custo_limpeza_in_protocolos()
+except Exception as e:
+    print(f"ERRO em ensure_custo_limpeza_in_protocolos: {e}")
 
 def ensure_regiao_in_registos_limpeza():
     conn = get_conn()
@@ -757,7 +770,10 @@ def ensure_regiao_in_registos_limpeza():
     finally:
         conn.close()
 
-ensure_regiao_in_registos_limpeza()
+try:
+    ensure_regiao_in_registos_limpeza()
+except Exception as e:
+    print(f"ERRO em ensure_regiao_in_registos_limpeza: {e}")
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
@@ -1102,7 +1118,12 @@ def ensure_schema_on_boot():
         conn.commit()
         conn.close()
 
-ensure_schema_on_boot()
+try:
+    ensure_schema_on_boot()
+except Exception as e:
+    print(f"ERRO na inicialização do schema: {e}")
+    import traceback
+    traceback.print_exc()
 
 # -----------------------------------------------------------------------------
 def ensure_destinatario_id():
@@ -1140,7 +1161,10 @@ def ensure_destinatario_id():
     finally:
         conn.close()
 
-ensure_destinatario_id()
+try:
+    ensure_destinatario_id()
+except Exception as e:
+    print(f"ERRO em ensure_destinatario_id: {e}")
 
 def add_verificacao_limpeza_column():
     conn = get_conn()
@@ -1177,7 +1201,10 @@ def add_verificacao_limpeza_column():
     finally:
         conn.close()
 
-add_verificacao_limpeza_column()
+try:
+    add_verificacao_limpeza_column()
+except Exception as e:
+    print(f"ERRO em add_verificacao_limpeza_column: {e}")
 
 def ensure_num_frota_in_pedidos_autorizacao():
     conn = get_conn()
@@ -1214,7 +1241,10 @@ def ensure_num_frota_in_pedidos_autorizacao():
     finally:
         conn.close()
 
-ensure_num_frota_in_pedidos_autorizacao()
+try:
+    ensure_num_frota_in_pedidos_autorizacao()
+except Exception as e:
+    print(f"ERRO em ensure_num_frota_in_pedidos_autorizacao: {e}")
 def ensure_comentarios_verificacao_in_registos_limpeza():
     conn = get_conn()
     cur = conn.cursor()
@@ -1250,7 +1280,10 @@ def ensure_comentarios_verificacao_in_registos_limpeza():
     finally:
         conn.close()
 
-ensure_comentarios_verificacao_in_registos_limpeza()
+try:
+    ensure_comentarios_verificacao_in_registos_limpeza()
+except Exception as e:
+    print(f"ERRO em ensure_comentarios_verificacao_in_registos_limpeza: {e}")
 
 def ensure_empresa_in_funcionarios():
     conn = get_conn()
@@ -1287,7 +1320,10 @@ def ensure_empresa_in_funcionarios():
     finally:
         conn.close()
 
-ensure_empresa_in_funcionarios()
+try:
+    ensure_empresa_in_funcionarios()
+except Exception as e:
+    print(f"ERRO em ensure_empresa_in_funcionarios: {e}")
 # Autenticação
 # -----------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
@@ -1511,7 +1547,8 @@ def home():
             kpi_today_sql += f" AND v.regiao = {ph}"
             kpi_today_params.append(regiao_user)
     cur.execute(kpi_today_sql, kpi_today_params)
-    kpi_today = cur.fetchone()["n"]
+    result = cur.fetchone()
+    kpi_today = result["n"] if isinstance(result, dict) else result[0]
 
     # KPI: viaturas limpas hoje (viaturas distintas limpas pelo menos uma vez hoje)
     kpi_today_veh_sql = f"""
@@ -1526,7 +1563,8 @@ def home():
             kpi_today_veh_sql += f" AND v.regiao = {ph}"
             kpi_today_veh_params.append(regiao_user)
     cur.execute(kpi_today_veh_sql, kpi_today_veh_params)
-    kpi_today_veh = cur.fetchone()["n"]
+    result = cur.fetchone()
+    kpi_today_veh = result["n"] if isinstance(result, dict) else result[0]
 
     # KPI: total de limpezas hoje (inclui extra)
     kpi_total_limpezas_sql = f"""
@@ -1541,7 +1579,8 @@ def home():
             kpi_total_limpezas_sql += f" AND v.regiao = {ph}"
             kpi_total_limpezas_params.append(regiao_user)
     cur.execute(kpi_total_limpezas_sql, kpi_total_limpezas_params)
-    kpi_total_limpezas = cur.fetchone()["n"]
+    result = cur.fetchone()
+    kpi_total_limpezas = result["n"] if isinstance(result, dict) else result[0]
 
     # KPI: registos últimos 7 dias
     kpi_week_sql = f"""
@@ -1555,7 +1594,8 @@ def home():
         kpi_week_sql += f" AND v.regiao = {ph}"
         kpi_week_params.append(regiao_gestor)
     cur.execute(kpi_week_sql, kpi_week_params)
-    kpi_week = cur.fetchone()["n"]
+    result = cur.fetchone()
+    kpi_week = result["n"] if isinstance(result, dict) else result[0]
 
     # KPI: registos este mês
     kpi_month_sql = f"""
@@ -1569,7 +1609,8 @@ def home():
         kpi_month_sql += f" AND v.regiao = {ph}"
         kpi_month_params.append(regiao_gestor)
     cur.execute(kpi_month_sql, kpi_month_params)
-    kpi_month = cur.fetchone()["n"]
+    result = cur.fetchone()
+    kpi_month = result["n"] if isinstance(result, dict) else result[0]
 
     # Limpezas por local
     sql_local = """
@@ -2047,7 +2088,8 @@ def viaturas():
                 FROM registos_limpeza r
                 WHERE r.viatura_id={ph} AND r.protocolo_id={ph}
             """, (v["id"], prot["id"]))
-            ult = cur.fetchone()["ult"]
+            result = cur.fetchone()
+            ult = result["ult"] if isinstance(result, dict) else result[0]
             if ult:
                 dias = (hoje - datetime.fromisoformat(ult).date()).days
             else:
