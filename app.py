@@ -1554,16 +1554,18 @@ def home():
     # Funções de data para cada motor
     if is_postgres(conn):
         dt_now = "CURRENT_DATE"
-        dt_fmt = "TO_CHAR(r.data_hora, 'YYYY-MM')"
+        dt_fmt = "TO_CHAR(r.data_hora::timestamp, 'YYYY-MM')"
         dt_eq = "= TO_CHAR(CURRENT_DATE, 'YYYY-MM')"
         dt_today = "= CURRENT_DATE"
         dt_7days = ">= CURRENT_DATE - INTERVAL '6 days'"
+        date_func = "r.data_hora::date"  # Para PostgreSQL
     else:
         dt_now = "date('now','localtime')"
         dt_fmt = "strftime('%Y-%m', r.data_hora)"
         dt_eq = "= strftime('%Y-%m', 'now','localtime')"
         dt_today = "= date('now','localtime')"
         dt_7days = ">= date('now','-6 days','localtime')"
+        date_func = "date(r.data_hora)"  # Para SQLite
 
     # Última limpeza por viatura/protocolo (filtrada por região)
     datetime_func = sql_datetime(conn, "r.data_hora")
@@ -1601,7 +1603,7 @@ def home():
         SELECT r.viatura_id, COUNT(*) as n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora){dt_today}
+        WHERE {date_func} {dt_today}
     """
     limpezas_hoje_params = []
     if regiao_gestor:
@@ -1618,7 +1620,7 @@ def home():
         SELECT r.viatura_id, COUNT(*) as n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora){dt_today}
+        WHERE {date_func} {dt_today}
     """
     limpas_hoje_params = []
     if user_role in ("gestor", "operador"):
@@ -1638,7 +1640,7 @@ def home():
         SELECT COUNT(*) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora){dt_today}
+        WHERE {date_func} {dt_today}
     """
     kpi_today_params = []
     if user_role in ("gestor", "operador"):
