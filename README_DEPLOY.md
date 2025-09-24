@@ -38,7 +38,7 @@ git init
 git add .
 git commit -m "Preparar para deploy no Render"
 git branch -M main
-git remote add origin https://github.com/SEU-USUARIO/SEU-REPOSITORIO.git
+git remote add origin https://github.com/pemafonte/app.git
 git push -u origin main
 ```
 
