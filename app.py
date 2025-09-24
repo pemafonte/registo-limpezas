@@ -688,31 +688,74 @@ def inject_can():
 def ensure_custo_limpeza_in_protocolos():
     conn = get_conn()
     cur = conn.cursor()
-    # PRAGMA só existe em SQLite, ignora em PostgreSQL
+    
     try:
-        cur.execute("PRAGMA table_info(protocolos)")
-        cols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'protocolos'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(protocolos)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
         if "custo_limpeza" not in cols:
-            cur.execute("ALTER TABLE protocolos ADD COLUMN custo_limpeza REAL DEFAULT 25")
-            conn.commit()
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_custo_limpeza")
+                cur.execute("ALTER TABLE protocolos ADD COLUMN custo_limpeza REAL DEFAULT 25")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_custo_limpeza")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_custo_limpeza")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
     except Exception:
         pass
-    conn.close()
+    finally:
+        conn.close()
 
 ensure_custo_limpeza_in_protocolos()
 
 def ensure_regiao_in_registos_limpeza():
     conn = get_conn()
     cur = conn.cursor()
+    
     try:
-        cur.execute("PRAGMA table_info(registos_limpeza)")
-        cols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(registos_limpeza)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
         if "regiao" not in cols:
-            cur.execute("ALTER TABLE registos_limpeza ADD COLUMN regiao TEXT")
-            conn.commit()
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_regiao")
+                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN regiao TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_regiao")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_regiao")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
     except Exception:
         pass
-    conn.close()
+    finally:
+        conn.close()
 
 ensure_regiao_in_registos_limpeza()
 # -----------------------------------------------------------------------------
@@ -1065,59 +1108,184 @@ ensure_schema_on_boot()
 def ensure_destinatario_id():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(pedidos_autorizacao)")
-    cols = {r["name"] for r in cur.fetchall()}
-    if "destinatario_id" not in cols:
-        cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN destinatario_id INTEGER")
-        conn.commit()
-    conn.close()
+    
+    try:
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pedidos_autorizacao'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(pedidos_autorizacao)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "destinatario_id" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_destinatario_id")
+                cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN destinatario_id INTEGER")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_destinatario_id")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_destinatario_id")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 ensure_destinatario_id()
 
 def add_verificacao_limpeza_column():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(registos_limpeza)")
-    cols = {r["name"] for r in cur.fetchall()}
-    if "verificacao_limpeza" not in cols:
-        cur.execute("ALTER TABLE registos_limpeza ADD COLUMN verificacao_limpeza TEXT")
-        conn.commit()
-    conn.close()
+    
+    try:
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(registos_limpeza)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "verificacao_limpeza" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_verificacao_limpeza")
+                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN verificacao_limpeza TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_verificacao_limpeza")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_verificacao_limpeza")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 add_verificacao_limpeza_column()
 
 def ensure_num_frota_in_pedidos_autorizacao():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(pedidos_autorizacao)")
-    cols = {r["name"] for r in cur.fetchall()}
-    if "num_frota" not in cols:
-        cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN num_frota TEXT")
-        conn.commit()
-    conn.close()
+    
+    try:
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pedidos_autorizacao'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(pedidos_autorizacao)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "num_frota" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_num_frota")
+                cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN num_frota TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_num_frota")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_num_frota")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 ensure_num_frota_in_pedidos_autorizacao()
 def ensure_comentarios_verificacao_in_registos_limpeza():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(registos_limpeza)")
-    cols = {r["name"] for r in cur.fetchall()}
-    if "comentarios_verificacao" not in cols:
-        cur.execute("ALTER TABLE registos_limpeza ADD COLUMN comentarios_verificacao TEXT")
-        conn.commit()
-    conn.close()
+    
+    try:
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(registos_limpeza)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "comentarios_verificacao" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_comentarios_verificacao")
+                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN comentarios_verificacao TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_comentarios_verificacao")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_comentarios_verificacao")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 ensure_comentarios_verificacao_in_registos_limpeza()
 
 def ensure_empresa_in_funcionarios():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(funcionarios)")
-    cols = {r["name"] for r in cur.fetchall()}
-    if "empresa" not in cols:
-        cur.execute("ALTER TABLE funcionarios ADD COLUMN empresa TEXT")
-        conn.commit()
-    conn.close()
+    
+    try:
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
+            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(funcionarios)")
+            cols = {r["name"] for r in cur.fetchall()}
+            
+        if "empresa" not in cols:
+            try:
+                if is_postgres(conn):
+                    cur.execute("SAVEPOINT add_empresa")
+                cur.execute("ALTER TABLE funcionarios ADD COLUMN empresa TEXT")
+                if is_postgres(conn):
+                    cur.execute("RELEASE SAVEPOINT add_empresa")
+                conn.commit()
+            except Exception:
+                if is_postgres(conn):
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT add_empresa")
+                    except:
+                        pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 ensure_empresa_in_funcionarios()
 # Autenticação
@@ -2110,16 +2278,28 @@ def importar_viaturas():
     ph = sql_placeholder(conn)
     # garantir colunas
     try:
-        cur.execute("PRAGMA table_info(viaturas)")
-        vcols = {r["name"] for r in cur.fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'viaturas'")
+            vcols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            cur.execute("PRAGMA table_info(viaturas)")
+            vcols = {r["name"] for r in cur.fetchall()}
     except Exception:
         vcols = set()
     for col in ("regiao","operacao","marca","modelo"):
         if col not in vcols:
             try:
+                if is_postgres(conn):
+                    cur.execute(f"SAVEPOINT add_{col}_vcol")
                 cur.execute(f"ALTER TABLE viaturas ADD COLUMN {col} TEXT")
+                if is_postgres(conn):
+                    cur.execute(f"RELEASE SAVEPOINT add_{col}_vcol")
             except Exception:
-                pass
+                if is_postgres(conn):
+                    try:
+                        cur.execute(f"ROLLBACK TO SAVEPOINT add_{col}_vcol")
+                    except:
+                        pass
 
     def _as_bool(v):
         s = (str(v or "").strip().lower())
@@ -2373,7 +2553,11 @@ def admin_run_migrations():
 
     # Helper para ver colunas
     def cols(table):
-        return {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall()}
+        if is_postgres(conn):
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", (table,))
+            return {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+        else:
+            return {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall()}
 
     done = []
 
