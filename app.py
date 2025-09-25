@@ -2990,7 +2990,7 @@ def protocolo_editar(pid: int):
             return redirect(url_for("protocolo_editar", pid=pid))
 
         try:
-            cur.execute(fix_sql_placeholders("""
+            cur.execute(fix_sql_placeholders(conn, """
                 UPDATE protocolos
                    SET nome=?, passos_json=?, frequencia_dias=?, ativo=?, custo_limpeza=?
                  WHERE id=?
@@ -3467,7 +3467,7 @@ def registo_apagar(rid: int):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute(fix_sql_placeholders("DELETE FROM registos_limpeza WHERE id=?"), (rid,))
+        cur.execute(fix_sql_placeholders(conn, "DELETE FROM registos_limpeza WHERE id=?"), (rid,))
         conn.commit()
         conn.close()
         flash("Registo eliminado.", "success")
@@ -3486,7 +3486,7 @@ def registo_apagar(rid: int):
 def ver_anexos(registo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(fix_sql_placeholders("SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id"), (registo_id,))
+    cur.execute(fix_sql_placeholders(conn, "SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id"), (registo_id,))
     anex = [dict(r) for r in cur.fetchall()]
     conn.close()
     return render_template("anexos.html", registo_id=registo_id, anexos=anex, signature=APP_SIGNATURE)
@@ -3497,7 +3497,7 @@ def ver_anexos(registo_id: int):
 def download_anexo(anexo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(fix_sql_placeholders("SELECT caminho FROM anexos WHERE id=?"), (anexo_id,))
+    cur.execute(fix_sql_placeholders(conn, "SELECT caminho FROM anexos WHERE id=?"), (anexo_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -3688,7 +3688,7 @@ def admin_user_toggle(user_id):
         flash("Não pode desativar a sua própria conta.", "warning")
         return redirect(url_for("admin_users"))
     conn = get_conn(); cur = conn.cursor()
-    cur.execute(fix_sql_placeholders("SELECT role, ativo FROM funcionarios WHERE id=?"), (user_id,))
+    cur.execute(fix_sql_placeholders(conn, "SELECT role, ativo FROM funcionarios WHERE id=?"), (user_id,))
     u = cur.fetchone()
     if not u:
         conn.close(); flash("Utilizador não encontrado.", "danger"); return redirect(url_for("admin_users"))
@@ -3710,7 +3710,7 @@ def admin_user_toggle(user_id):
 @require_perm("users:manage")
 def admin_user_reset_password(user_id):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute(fix_sql_placeholders("SELECT id, username, nome FROM funcionarios WHERE id=?"), (user_id,))
+    cur.execute(fix_sql_placeholders(conn, "SELECT id, username, nome FROM funcionarios WHERE id=?"), (user_id,))
     user = cur.fetchone()
     if not user:
         conn.close()
@@ -3839,9 +3839,9 @@ def admin_role_new():
             flash("Nome do perfil obrigatório.", "danger"); return redirect(url_for("admin_role_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
-            cur.execute(fix_sql_placeholders("INSERT INTO roles (name) VALUES (?)"), (name,))
+            cur.execute(fix_sql_placeholders(conn, "INSERT INTO roles (name) VALUES (?)"), (name,))
             role_id = cur.lastrowid
-            cur.executemany(fix_sql_placeholders("INSERT INTO role_permissions (role_id, perm) VALUES (?,?)"), [(role_id, p) for p in perms])
+            cur.executemany(fix_sql_placeholders(conn, "INSERT INTO role_permissions (role_id, perm) VALUES (?,?)"), [(role_id, p) for p in perms])
             conn.commit(); flash("Perfil criado.", "info")
             return redirect(url_for("admin_roles"))
         except sqlite3.IntegrityError:
@@ -3866,7 +3866,7 @@ def admin_alterar_regiao_viatura():
         viatura_id = request.form.get("viatura_id")
         nova_regiao = request.form.get("nova_regiao", "").strip()
         if viatura_id and nova_regiao:
-            cur.execute(fix_sql_placeholders("UPDATE viaturas SET regiao=? WHERE id=?"), (nova_regiao, viatura_id))
+            cur.execute(fix_sql_placeholders(conn, "UPDATE viaturas SET regiao=? WHERE id=?"), (nova_regiao, viatura_id))
             conn.commit()
             flash("Região da viatura atualizada.", "success")
         else:
@@ -3926,7 +3926,7 @@ def admin_import_viaturas():
             ativo = row.get("ativo") or row.get("ATIVO")
             ativo = 1 if str(ativo).strip().lower() in {"1","true","sim","yes","y"} else 1  # default 1
 
-            cur.execute(fix_sql_placeholders("SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
+            cur.execute(fix_sql_placeholders(conn, "SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
             ex = cur.fetchone()
             if ex:
                 cur.execute("""UPDATE viaturas
@@ -3935,7 +3935,7 @@ def admin_import_viaturas():
                             (num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, ex["id"]))
                 upd += 1
             else:
-                cur.execute(fix_sql_placeholders("""INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
+                cur.execute(fix_sql_placeholders(conn, """INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
                                VALUES (?,?,?,?,?,?,?,?,?,?)"""),
                             (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo))
                 ins += 1
@@ -3956,7 +3956,7 @@ def admin_utilizadores_delete(user_id):
     if not session.get("is_admin"):
         return redirect(url_for("sem_permissao"))
     conn = get_conn()
-    conn.execute(fix_sql_placeholders("DELETE FROM utilizadores WHERE id = ?;"), (user_id,))
+    conn.execute(fix_sql_placeholders(conn, "DELETE FROM utilizadores WHERE id = ?;"), (user_id,))
     conn.commit()
     flash("Utilizador eliminado com sucesso.", "success")
     return redirect(url_for("admin_utilizadores"))
@@ -3976,7 +3976,7 @@ def admin_protocolos_new():
         flash("Indica um nome para o protocolo.", "warning")
         return redirect(url_for("admin_protocolos"))
     conn = get_conn()
-    conn.execute(fix_sql_placeholders("INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);"),
+    conn.execute(fix_sql_placeholders(conn, "INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);"),
                 (nome, conteudo))
     conn.commit()
     flash("Protocolo criado.", "success")
@@ -3990,7 +3990,7 @@ def admin_protocolos_edit(pid):
     conteudo = request.form.get("conteudo", "").strip()
     ativo = 1 if request.form.get("ativo") == "on" else 0
     conn = get_conn()
-    conn.execute(fix_sql_placeholders("UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;"),
+    conn.execute(fix_sql_placeholders(conn, "UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;"),
                 (nome, conteudo, ativo, pid))
     conn.commit()
     flash("Protocolo atualizado.", "success")
@@ -4004,9 +4004,9 @@ def protocolo_apagar(pid: int):
     cur = conn.cursor()
     try:
         # Limpar referências ao protocolo nas viaturas
-        cur.execute(fix_sql_placeholders("UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)"), (pid,))
+        cur.execute(fix_sql_placeholders(conn, "UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)"), (pid,))
         # Apagar o protocolo
-        cur.execute(fix_sql_placeholders("DELETE FROM protocolos WHERE id=?"), (pid,))
+        cur.execute(fix_sql_placeholders(conn, "DELETE FROM protocolos WHERE id=?"), (pid,))
         conn.commit()
         conn.close()
         flash("Protocolo eliminado.", "success")
