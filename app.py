@@ -3593,14 +3593,20 @@ def exportar_contabilidade_excel():
             # Ordena para exportar do mais recente para o mais antigo
             df = df.sort_values(["data"], ascending=[False])
             print("DEBUG: DataFrame processado com sucesso")
+            
+            cols = [
+                "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
+                "custo_limpeza", "funcionario", "empresa", "local"
+            ]
+            df = df[cols]
         else:
-            print("DEBUG: DataFrame vazio")
-
-        cols = [
-            "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
-            "custo_limpeza", "funcionario", "empresa", "local"
-        ]
-        df = df[cols]
+            print("DEBUG: DataFrame vazio - criando DataFrame com colunas vazias")
+            # Criar DataFrame vazio com as colunas corretas
+            cols = [
+                "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
+                "custo_limpeza", "funcionario", "empresa", "local"
+            ]
+            df = pd.DataFrame(columns=cols)
 
         print("DEBUG: Criando arquivo Excel...")
         fname = EXPORT_DIR / f"contabilidade_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -3662,10 +3668,14 @@ def admin_user_toggle(user_id):
     if not u:
         conn.close(); flash("Utilizador não encontrado.", "danger"); return redirect(url_for("admin_users"))
     if (u["role"] or "").lower() == "admin" and u["ativo"] == 1:
-        cur.execute("SELECT COUNT(*) AS n FROM funcionarios WHERE LOWER(role)='admin' AND ativo=1 AND id<>?", (user_id,))
+        placeholder = sql_placeholder(conn)
+        cur.execute(f"SELECT COUNT(*) AS n FROM funcionarios WHERE LOWER(role)='admin' AND ativo=1 AND id<>{placeholder}", (user_id,))
         if cur.fetchone()["n"] == 0:
             conn.close(); flash("Não pode desativar o último admin ativo.", "danger"); return redirect(url_for("admin_users"))
-    cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
+    if is_postgres(conn):
+        cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=$1", (user_id,))
+    else:
+        cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
     conn.commit(); conn.close()
     flash("Estado do utilizador atualizado.", "success")
     return redirect(url_for("admin_users"))
@@ -3686,7 +3696,10 @@ def admin_user_reset_password(user_id):
         if not new_password:
             flash("A nova password é obrigatória.", "danger")
         else:
-            cur.execute("UPDATE funcionarios SET password=? WHERE id=?", (generate_password_hash(new_password), user_id))
+            if is_postgres(conn):
+                cur.execute("UPDATE funcionarios SET password=$1 WHERE id=$2", (generate_password_hash(new_password), user_id))
+            else:
+                cur.execute("UPDATE funcionarios SET password=? WHERE id=?", (generate_password_hash(new_password), user_id))
             conn.commit()
             flash("Password redefinida com sucesso.", "success")
             conn.close()
@@ -3713,14 +3726,25 @@ def admin_user_new():
             return redirect(url_for("admin_user_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
+            placeholder = sql_placeholder(conn)
+            if is_postgres(conn):
+                sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            else:
+                sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            
             cur.execute(
-                "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                sql,
                 (username, nome or username, role, ativo, regiao, generate_password_hash(password), email, empresa)
             )
             conn.commit(); flash("Utilizador criado.", "success")
             return redirect(url_for("admin_users"))
-        except sqlite3.IntegrityError:
-            flash("Username já existe.", "danger")
+        except Exception as e:
+            # Handle both SQLite IntegrityError and PostgreSQL IntegrityError
+            error_msg = str(e).lower()
+            if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
+                flash("Username já existe.", "danger")
+            else:
+                flash(f"Erro ao criar utilizador: {str(e)}", "danger")
             return redirect(url_for("admin_user_new"))
         finally:
             conn.close()
@@ -3743,16 +3767,27 @@ def admin_user_edit(user_id):
             flash("Username é obrigatório.", "danger"); conn.close()
             return redirect(url_for("admin_user_edit", user_id=user_id))
         try:
+            if is_postgres(conn):
+                sql = "UPDATE funcionarios SET username=$1, nome=$2, role=$3, ativo=$4, regiao=$5, email=$6, empresa=$7 WHERE id=$8"
+            else:
+                sql = "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, email=?, empresa=? WHERE id=?"
+            
             cur.execute(
-                "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, email=?, empresa=? WHERE id=?",
+                sql,
                 (username, nome or username, role, ativo, regiao, email, empresa, user_id)
             )
             conn.commit(); flash("Utilizador atualizado.", "info")
             return redirect(url_for("admin_users"))
-        except sqlite3.IntegrityError:
-            flash("Username já existe.", "danger"); conn.close()
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
+                flash("Username já existe.", "danger")
+            else:
+                flash(f"Erro ao atualizar utilizador: {str(e)}", "danger")
+            conn.close()
             return redirect(url_for("admin_user_edit", user_id=user_id))
-    cur.execute("SELECT * FROM funcionarios WHERE id=?", (user_id,))
+    placeholder = sql_placeholder(conn)
+    cur.execute(f"SELECT * FROM funcionarios WHERE id={placeholder}", (user_id,))
     u = cur.fetchone(); conn.close()
     if not u:
         flash("Utilizador não encontrado.", "danger")
