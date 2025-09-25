@@ -613,15 +613,20 @@ def get_conn():
     db_url = os.environ.get("DATABASE_URL")
     try:
         if db_url and psycopg2:
-            # Heroku/PostgreSQL
+            # Heroku/PostgreSQL with timeout settings
             print(f"DEBUG: Conectando ao PostgreSQL: {db_url[:50]}...")
-            conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
+            conn = psycopg2.connect(
+                db_url, 
+                cursor_factory=psycopg2.extras.RealDictCursor,
+                connect_timeout=10,  # 10 second timeout
+                options='-c statement_timeout=30000'  # 30 second statement timeout
+            )
             print("DEBUG: Conexão PostgreSQL estabelecida com sucesso")
             return conn
         else:
             # Local/SQLite
             print(f"DEBUG: Conectando ao SQLite: {DB_PATH}")
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=10.0)
             conn.row_factory = sqlite3.Row
             print("DEBUG: Conexão SQLite estabelecida com sucesso")
             return conn
@@ -4471,9 +4476,30 @@ def export_registos_excel():
 # -----------------------------------------------------------------------------
 # Arrancar
 # -----------------------------------------------------------------------------
+
+# Try to initialize schema early (but don't fail if it doesn't work)
+def initialize_schema_early():
+    global _schema_initialized
+    if not _schema_initialized:
+        try:
+            print("DEBUG: Tentando inicialização precoce do schema...")
+            ensure_schema_on_boot()
+            _schema_initialized = True
+            print("DEBUG: Inicialização precoce do schema bem-sucedida!")
+        except Exception as e:
+            print(f"DEBUG: Inicialização precoce falhou (será tentada no primeiro request): {e}")
+
+# Initialize schema early when not in production or when safe to do so
 if __name__ == "__main__":
+    initialize_schema_early()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+else:
+    # When running under gunicorn, try early initialization but don't block startup
+    try:
+        initialize_schema_early()
+    except Exception as e:
+        print(f"DEBUG: Inicialização precoce sob gunicorn falhou: {e}")
 # ---- Extensões de esquema (idempotentes) ----
 
 
@@ -4481,9 +4507,18 @@ if __name__ == "__main__":
 # Flag para evitar múltiplas inicializações
 _schema_initialized = False
 
+# Health check endpoint para Render (não requer autenticação)
+@app.route('/health')
+def health_check():
+    return {'status': 'ok', 'schema_initialized': _schema_initialized}, 200
+
 @app.before_request
 def ensure_database_ready():
     global _schema_initialized
+    # Skip schema initialization for health check
+    if request.endpoint == 'health_check':
+        return
+        
     if not _schema_initialized:
         print("DEBUG: Inicializando schema no primeiro request...")
         try:
@@ -4497,7 +4532,7 @@ def ensure_database_ready():
 
 @app.before_request
 def force_login():
-    public_endpoints = {"login", "static", "sem_permissao", "debug"}
+    public_endpoints = {"login", "static", "sem_permissao", "debug", "health_check"}
     ep = request.endpoint or ""
     if ep.split(".")[0] in {"static"} or ep in public_endpoints:
         return
