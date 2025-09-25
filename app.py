@@ -652,6 +652,13 @@ def fix_datetime_in_sql(conn, sql):
         return re.sub(r'datetime\(([^)]+)\)', r'(\1)::timestamp', sql)
     return sql
 
+def sql_today_condition(conn, date_field):
+    """Retorna condição SQL para comparar um campo de data com hoje"""
+    if is_postgres(conn):
+        return f"({date_field})::date = CURRENT_DATE"
+    else:
+        return f"date({date_field}) = date('now','localtime')"
+
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
 
@@ -1886,16 +1893,16 @@ def home():
     }
 
     # Viaturas limpas por protocolo (hoje, filtradas por região se gestor)
-    viaturas_proto_sql = """
+    viaturas_proto_sql = f"""
         SELECT r.protocolo_id, p.nome as protocolo_nome, v.matricula, v.num_frota, v.descricao
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
         JOIN protocolos p ON p.id = r.protocolo_id
-        WHERE date(r.data_hora) = date('now','localtime')
+        WHERE {date_func} {dt_today}
     """
     viaturas_proto_params = []
     if regiao_gestor:
-        viaturas_proto_sql += " AND v.regiao = ?"
+        viaturas_proto_sql += f" AND v.regiao = {ph}"
         viaturas_proto_params.append(regiao_gestor)
     viaturas_proto_sql += " ORDER BY p.nome, v.matricula"
     cur.execute(viaturas_proto_sql, viaturas_proto_params)
@@ -1920,7 +1927,7 @@ def home():
             FROM pedidos_autorizacao pa
             JOIN viaturas v ON v.id = pa.viatura_id
             JOIN funcionarios f ON f.id = pa.funcionario_id
-            WHERE pa.validado=0 AND pa.destinatario_id=? AND date(pa.data_pedido)=date('now','localtime')
+            WHERE pa.validado=0 AND pa.destinatario_id=? AND {sql_today_condition(conn, "pa.data_pedido")}
             ORDER BY pa.data_pedido DESC
         """, (gestor_id,))
         pedidos_pendentes = [dict(r) for r in cur.fetchall()]
@@ -1950,25 +1957,16 @@ def pedidos_autorizacao():
     conn = get_conn()
     cur = conn.cursor()
     ph = sql_placeholder(conn)
-    # Compatível com SQLite e PostgreSQL para data de hoje
-    if is_postgres(conn):
-        cur.execute(f"""
-            SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
-            FROM pedidos_autorizacao pa
-            JOIN viaturas v ON v.id = pa.viatura_id
-            JOIN funcionarios f ON f.id = pa.funcionario_id
-            WHERE pa.validado=0 AND pa.destinatario_id={ph} AND pa.data_pedido::date = CURRENT_DATE
-            ORDER BY pa.data_pedido DESC
-        """, (gestor_id,))
-    else:
-        cur.execute(f"""
-            SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
-            FROM pedidos_autorizacao pa
-            JOIN viaturas v ON v.id = pa.viatura_id
-            JOIN funcionarios f ON f.id = pa.funcionario_id
-            WHERE pa.validado=0 AND pa.destinatario_id={ph} AND date(pa.data_pedido)=date('now','localtime')
-            ORDER BY pa.data_pedido DESC
-        """, (gestor_id,))
+    # Usando função auxiliar para condição de data de hoje
+    today_condition = sql_today_condition(conn, "pa.data_pedido")
+    cur.execute(f"""
+        SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
+        FROM pedidos_autorizacao pa
+        JOIN viaturas v ON v.id = pa.viatura_id
+        JOIN funcionarios f ON f.id = pa.funcionario_id
+        WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
+        ORDER BY pa.data_pedido DESC
+    """, (gestor_id,))
     pedidos = [dict(r) for r in cur.fetchall()]
     conn.close()
     return render_template("pedidos_autorizacao.html", pedidos=pedidos, signature=APP_SIGNATURE)
@@ -2822,9 +2820,10 @@ def solicitar_autorizacao(viatura_id):
         return redirect(url_for("novo_registo"))
 
     # Verifica se já existe pedido pendente hoje
-    cur.execute("""
+    today_condition = sql_today_condition(conn, "data_pedido")
+    cur.execute(f"""
         SELECT 1 FROM pedidos_autorizacao
-        WHERE viatura_id=? AND funcionario_id=? AND date(data_pedido)=date('now','localtime') AND validado=0
+        WHERE viatura_id=? AND funcionario_id=? AND {today_condition} AND validado=0
     """, (viatura_id, funcionario_id))
     if not cur.fetchone():
         cur.execute(
@@ -2871,14 +2870,16 @@ def novo_registo():
 
         cur.execute("SELECT id, nome, passos_json, frequencia_dias FROM protocolos WHERE ativo=1 ORDER BY nome")
         ps = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT DISTINCT viatura_id FROM registos_limpeza WHERE date(data_hora) = date('now','localtime')")
+        today_condition_limpeza = sql_today_condition(conn, "data_hora")
+        cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
         cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
         gestores = [dict(row) for row in cur.fetchall()]
         # Viaturas autorizadas a limpeza extra hoje
-        cur.execute("""
+        today_condition_pedido = sql_today_condition(conn, "data_pedido")
+        cur.execute(f"""
             SELECT viatura_id FROM pedidos_autorizacao
-            WHERE validado=1 AND date(data_pedido)=date('now','localtime')
+            WHERE validado=1 AND {today_condition_pedido}
         """)
         viaturas_autorizadas = {r["viatura_id"] for r in cur.fetchall()}
         conn.close()
@@ -2908,9 +2909,10 @@ def novo_registo():
         return redirect(url_for("novo_registo"))
     
     # Verifica se já foi limpa hoje
-    cur.execute("""
+    today_condition = sql_today_condition(conn, "data_hora")
+    cur.execute(f"""
         SELECT COUNT(*) FROM registos_limpeza
-        WHERE viatura_id = ? AND date(data_hora) = date('now','localtime')
+        WHERE viatura_id = ? AND {today_condition}
     """, (viatura_id,))
     ja_limpo_hoje = cur.fetchone()[0] > 0
 
@@ -2918,11 +2920,12 @@ def novo_registo():
     extra_autorizada = 1 if pedido_autorizado else 0
     responsavel_autorizacao = None
     if pedido_autorizado:
-        cur.execute("""
+        today_condition = sql_today_condition(conn, "pa.data_pedido")
+        cur.execute(f"""
             SELECT f.nome
             FROM pedidos_autorizacao pa
             JOIN funcionarios f ON f.id = pa.destinatario_id
-            WHERE pa.viatura_id=? AND pa.funcionario_id=? AND pa.validado=1 AND date(pa.data_pedido)=date('now','localtime')
+            WHERE pa.viatura_id=? AND pa.funcionario_id=? AND pa.validado=1 AND {today_condition}
             ORDER BY pa.data_pedido DESC LIMIT 1
         """, (viatura_id, funcionario_id))
         row = cur.fetchone()
@@ -2944,13 +2947,15 @@ def novo_registo():
         vs = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT id, nome FROM protocolos WHERE ativo=1 ORDER BY nome")
         ps = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT DISTINCT viatura_id FROM registos_limpeza WHERE date(data_hora) = date('now','localtime')")
+        today_condition_limpeza = sql_today_condition(conn, "data_hora")
+        cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
         cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
         gestores = [dict(row) for row in cur.fetchall()]
-        cur.execute("""
+        today_condition_pedido = sql_today_condition(conn, "data_pedido")
+        cur.execute(f"""
             SELECT viatura_id FROM pedidos_autorizacao
-            WHERE validado=1 AND date(data_pedido)=date('now','localtime')
+            WHERE validado=1 AND {today_condition_pedido}
         """)
         viaturas_autorizadas = {r["viatura_id"] for r in cur.fetchall()}
         conn.close()
@@ -3018,9 +3023,10 @@ def novo_registo():
             )
 
     if pedido_autorizado:
-        cur.execute("""
+        today_condition = sql_today_condition(conn, "data_pedido")
+        cur.execute(f"""
             DELETE FROM pedidos_autorizacao
-            WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND date(data_pedido)=date('now','localtime')
+            WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
         """, (viatura_id, funcionario_id))
     conn.commit()
     conn.close()
@@ -3030,9 +3036,10 @@ def novo_registo():
 def pedido_autorizado_hoje(viatura_id, funcionario_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+    today_condition = sql_today_condition(conn, "data_pedido")
+    cur.execute(f"""
         SELECT 1 FROM pedidos_autorizacao
-         WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND date(data_pedido)=date('now','localtime')
+         WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
     """, (viatura_id, funcionario_id))
     res = cur.fetchone()
     conn.close()
