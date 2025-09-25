@@ -1934,12 +1934,14 @@ def home():
     pedidos_pendentes = []
     if user_role in ["admin", "gestor"]:
         gestor_id = user_id
-        cur.execute("""
+        ph = sql_placeholder(conn)
+        today_condition = sql_today_condition(conn, "pa.data_pedido")
+        cur.execute(f"""
             SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
             FROM pedidos_autorizacao pa
             JOIN viaturas v ON v.id = pa.viatura_id
             JOIN funcionarios f ON f.id = pa.funcionario_id
-            WHERE pa.validado=0 AND pa.destinatario_id=? AND {sql_today_condition(conn, "pa.data_pedido")}
+            WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
             ORDER BY pa.data_pedido DESC
         """, (gestor_id,))
         pedidos_pendentes = [dict(r) for r in cur.fetchall()]
