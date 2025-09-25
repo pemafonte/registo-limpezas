@@ -3436,11 +3436,11 @@ def finalizar_registo(registo_id):
     hora_fim = datetime.now().strftime("%H:%M")
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(fix_sql_placeholders(conn, """
         UPDATE registos_limpeza
         SET hora_fim=?, estado='concluido'
         WHERE id=?
-    """, (hora_fim, registo_id))
+    """), (hora_fim, registo_id))
     conn.commit()
     conn.close()
     flash("Registo finalizado.", "success")
