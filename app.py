@@ -2536,7 +2536,13 @@ def viaturas():
             result = cur.fetchone()
             ult = result["ult"] if isinstance(result, dict) else result[0]
             if ult:
-                dias = (hoje - datetime.fromisoformat(ult).date()).days
+                # Handle both string (SQLite) and datetime (PostgreSQL) formats
+                if isinstance(ult, str):
+                    dias = (hoje - datetime.fromisoformat(ult).date()).days
+                else:
+                    # Assume it's already a datetime object from PostgreSQL
+                    dt = ult.date() if hasattr(ult, 'date') else ult
+                    dias = (hoje - dt).days
             else:
                 dias = None
             v[f"dias_{nome.replace(' ', '_').lower()}"] = dias
@@ -3304,13 +3310,13 @@ def novo_registo():
     responsavel_autorizacao = None
     if pedido_autorizado:
         today_condition = sql_today_condition(conn, "pa.data_pedido")
-        cur.execute(f"""
+        cur.execute(fix_sql_placeholders(conn, f"""
             SELECT f.nome
             FROM pedidos_autorizacao pa
             JOIN funcionarios f ON f.id = pa.destinatario_id
             WHERE pa.viatura_id=? AND pa.funcionario_id=? AND pa.validado=1 AND {today_condition}
             ORDER BY pa.data_pedido DESC LIMIT 1
-        """, (viatura_id, funcionario_id))
+        """), (viatura_id, funcionario_id))
         row = cur.fetchone()
         responsavel_autorizacao = row["nome"] if row else None
 
