@@ -3597,44 +3597,30 @@ def exportar_contabilidade_excel():
             WHERE 1=1
         """
         params = []
-        param_counter = 1
         
         if mes:
             month_format = sql_month_format(conn, "r.data_hora")
-            if is_pg:
-                sql += f" AND {month_format} = ${param_counter}"
-                param_counter += 1
-            else:
-                sql += f" AND {month_format} = ?"
+            sql += f" AND {month_format} = ?"
             params.append(mes)
             
         if protocolo_id:
-            if is_pg:
-                sql += f" AND p.id = ${param_counter}"
-                param_counter += 1
-            else:
-                sql += " AND p.id = ?"
+            sql += " AND p.id = ?"
             params.append(protocolo_id)
             
         if regiao:
-            if is_pg:
-                sql += f" AND v.regiao = ${param_counter}"
-                param_counter += 1
-            else:
-                sql += " AND v.regiao = ?"
+            sql += " AND v.regiao = ?"
             params.append(regiao)
             
         if empresa:
-            if is_pg:
-                sql += f" AND f.empresa = ${param_counter}"
-                param_counter += 1
-            else:
-                sql += " AND f.empresa = ?"
+            sql += " AND f.empresa = ?"
             params.append(empresa) 
 
         # Use sql_date helper for cross-database compatibility
         order_date_sql = sql_date(conn, "r.data_hora")
         sql += f" ORDER BY v.regiao ASC, {order_date_sql} ASC, r.id ASC"
+        
+        # Fix SQL placeholders for the database type before using with pandas
+        sql = fix_sql_placeholders(conn, sql)
         
         print(f"DEBUG: SQL query for contabilidade export: {sql}")
         print(f"DEBUG: Parameters: {params}")
