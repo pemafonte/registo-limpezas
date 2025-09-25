@@ -673,6 +673,12 @@ def sql_date(conn, date_field):
     else:
         return f"date({date_field})"
 
+def fix_sql_placeholders(conn, sql):
+    """Converte placeholders ? para %s se for PostgreSQL"""
+    if is_postgres(conn):
+        return sql.replace('?', '%s')
+    return sql
+
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
 
@@ -2045,10 +2051,9 @@ def exportar_viaturas_csv():
         params.append(int(f_ativo))
 
     cur.execute(f"""
-    SELECT v.id, v.matricula,
-           COALESCE(v.numero_frota, v.num_frota) AS numero_frota,
+    SELECT v.id, v.matricula, v.num_frota,
            v.regiao, v.operacao, v.marca, v.modelo, v.tipo_protocolo,
-           v.descricao, v.filial, v.num_frota, v.ativo, v.criado_em
+           v.descricao, v.filial, v.ativo, v.criado_em
     FROM viaturas v
     WHERE { " AND ".join(where) }
     ORDER BY v.matricula
@@ -2173,7 +2178,7 @@ def viaturas():
           GROUP BY viatura_id
         )
         SELECT v.id, v.matricula, v.descricao, v.filial,
-               COALESCE(v.numero_frota, v.num_frota) AS num_frota,
+               v.num_frota,
                v.regiao, v.operacao, v.marca, v.modelo, v.tipo_protocolo, v.ativo,
                l.local AS ultima_local, l.hora_inicio, l.hora_fim,
                f.username AS ultima_user
@@ -2684,7 +2689,8 @@ def protocolo_editar(pid: int):
         finally:
             conn.close()
 
-    cur.execute("SELECT * FROM protocolos WHERE id=?", (pid,))
+    ph = sql_placeholder(conn)
+    cur.execute(f"SELECT * FROM protocolos WHERE id={ph}", (pid,))
     p = cur.fetchone()
     conn.close()
     if not p:
@@ -3631,7 +3637,8 @@ def contabilidade():
     if empresa:
         sql += " AND f.empresa = ?"
         params.append(empresa)
-    sql += " ORDER BY regiao ASC, datetime(r.data_hora) ASC, r.id ASC"
+    datetime_order = sql_datetime(conn, "r.data_hora")
+    sql += f" ORDER BY regiao ASC, {datetime_order} ASC, r.id ASC"
     cur.execute(sql, params)
     registos = [dict(row) for row in cur.fetchall()]
 
@@ -3705,7 +3712,8 @@ def registos():
     if regiao_user:
         sql += " AND v.regiao = ?"
         params.append(regiao_user)
-    sql += " ORDER BY v.regiao ASC, datetime(r.data_hora) ASC, r.id ASC"
+    datetime_order = sql_datetime(conn, "r.data_hora")
+    sql += f" ORDER BY v.regiao ASC, {datetime_order} ASC, r.id ASC"
     cur.execute(sql, params)
     registos = [dict(row) for row in cur.fetchall()]
     conn.close()
