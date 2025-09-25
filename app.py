@@ -4129,13 +4129,19 @@ def registos():
     """
     params = []
     if mes:
-        sql += " AND strftime('%Y-%m', r.data_hora) = ?"
+        # Use sql_month_format helper for cross-database compatibility
+        month_format = sql_month_format(conn, "r.data_hora")
+        sql += f" AND {month_format} = ?"
         params.append(mes)
     if regiao_user:
         sql += " AND v.regiao = ?"
         params.append(regiao_user)
+    
     datetime_order = sql_datetime(conn, "r.data_hora")
     sql += f" ORDER BY v.regiao ASC, {datetime_order} ASC, r.id ASC"
+    
+    # Fix parameter placeholders for PostgreSQL
+    sql = fix_sql_placeholders(conn, sql)
     cur.execute(sql, params)
     registos = [dict(row) for row in cur.fetchall()]
     conn.close()
