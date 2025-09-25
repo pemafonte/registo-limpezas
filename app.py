@@ -4070,7 +4070,8 @@ def export_excel():
     user_role = session.get("role")
     regiao_user = None
     if user_role in ("operador", "gestor"):
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        ph = sql_placeholder(conn)
+        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
 
@@ -4098,13 +4099,17 @@ def export_excel():
         WHERE 1=1
     """
     params = []
+    ph = sql_placeholder(conn)
     if mes:
-        sql += " AND strftime('%Y-%m', r.data_hora) = ?"
+        month_format = sql_month_format(conn, "r.data_hora")
+        sql += f" AND {month_format} = {ph}"
         params.append(mes)
     if regiao_user and user_role != "admin":
-        sql += " AND v.regiao = ?"
+        sql += f" AND v.regiao = {ph}"
         params.append(regiao_user)
-    sql += " ORDER BY datetime(r.data_hora) DESC, r.id DESC"
+    
+    datetime_order = sql_datetime(conn, "r.data_hora")
+    sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
      
@@ -4195,7 +4200,8 @@ def export_registos_excel():
     user_role = session.get("role")
     regiao_user = None
     if user_role in ("operador", "gestor"):
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        ph = sql_placeholder(conn)
+        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
 
@@ -4223,13 +4229,16 @@ def export_registos_excel():
         WHERE 1=1
     """
     params = []
+    ph = sql_placeholder(conn)
     if mes:
-        sql += " AND strftime('%Y-%m', r.data_hora) = ?"
+        month_format = sql_month_format(conn, "r.data_hora")
+        sql += f" AND {month_format} = {ph}"
         params.append(mes)
     if regiao_user and user_role != "admin":
-        sql += " AND v.regiao = ?"
+        sql += f" AND v.regiao = {ph}"
         params.append(regiao_user)
-    sql += " ORDER BY datetime(r.data_hora) DESC, r.id DESC"
+    datetime_order = sql_datetime(conn, "r.data_hora")
+    sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
 
