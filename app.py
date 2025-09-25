@@ -3686,32 +3686,41 @@ def exportar_contabilidade_excel():
         print(f"DEBUG: SQL query for contabilidade export: {sql}")
         print(f"DEBUG: Parameters: {params}")
         
-        # Test the query first with regular cursor to check for errors
+        # Execute query manually to avoid pandas/psycopg2 compatibility issues
         try:
-            test_cur = conn.cursor()
-            test_cur.execute(sql, tuple(params))
-            test_results = test_cur.fetchall()
-            print(f"DEBUG: Test query returned {len(test_results)} rows")
-            if test_results:
-                print(f"DEBUG: First row: {dict(test_results[0])}")
+            cur = conn.cursor()
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            print(f"DEBUG: Manual query returned {len(rows)} rows")
+            
+            if rows:
+                print(f"DEBUG: First row data: {dict(rows[0])}")
+                # Convert rows to list of dictionaries
+                data_rows = [dict(row) for row in rows]
+                df = pd.DataFrame(data_rows)
             else:
                 print("DEBUG: Query returned no rows - checking if tables have data...")
                 # Check if tables have any data
-                test_cur.execute("SELECT COUNT(*) as count FROM registos_limpeza")
-                registos_count = test_cur.fetchone()["count"]
-                test_cur.execute("SELECT COUNT(*) as count FROM viaturas")
-                viaturas_count = test_cur.fetchone()["count"]
-                test_cur.execute("SELECT COUNT(*) as count FROM protocolos")
-                protocolos_count = test_cur.fetchone()["count"]
-                test_cur.execute("SELECT COUNT(*) as count FROM funcionarios")
-                funcionarios_count = test_cur.fetchone()["count"]
+                cur.execute("SELECT COUNT(*) as count FROM registos_limpeza")
+                registos_count = cur.fetchone()["count"]
+                cur.execute("SELECT COUNT(*) as count FROM viaturas")
+                viaturas_count = cur.fetchone()["count"] 
+                cur.execute("SELECT COUNT(*) as count FROM protocolos")
+                protocolos_count = cur.fetchone()["count"]
+                cur.execute("SELECT COUNT(*) as count FROM funcionarios")
+                funcionarios_count = cur.fetchone()["count"]
                 print(f"DEBUG: Table counts - registos: {registos_count}, viaturas: {viaturas_count}, protocolos: {protocolos_count}, funcionarios: {funcionarios_count}")
-        except Exception as test_e:
-            print(f"DEBUG: Test query failed: {test_e}")
+                
+                # Create empty DataFrame with correct column structure
+                df = pd.DataFrame(columns=[
+                    'data', 'matricula', 'num_frota', 'regiao', 'protocolo', 
+                    'custo_limpeza', 'funcionario', 'empresa', 'local'
+                ])
+                
+        except Exception as manual_e:
+            print(f"DEBUG: Manual query failed: {manual_e}")
             conn.close()
-            raise test_e
-        
-        df = pd.read_sql_query(sql, conn, params=params)
+            raise manual_e
         print(f"DEBUG: DataFrame shape: {df.shape}")
         if not df.empty:
             print(f"DEBUG: DataFrame columns: {list(df.columns)}")
@@ -4483,20 +4492,32 @@ def export_registos_excel():
     final_sql = fix_sql_placeholders(conn, sql)
     print(f"DEBUG: Final SQL after placeholders: {final_sql}")
     
-    # Test query first
+    # Execute query manually to avoid pandas/psycopg2 compatibility issues
     try:
-        test_cur = conn.cursor()
-        test_cur.execute(final_sql, tuple(params))
-        test_results = test_cur.fetchall()
-        print(f"DEBUG: Test query returned {len(test_results)} rows")
-        if test_results:
-            print(f"DEBUG: First test row: {dict(test_results[0])}")
-    except Exception as test_e:
-        print(f"DEBUG: Test query failed: {test_e}")
+        cur = conn.cursor()
+        cur.execute(final_sql, tuple(params))
+        rows = cur.fetchall()
+        print(f"DEBUG: Manual export query returned {len(rows)} rows")
+        
+        if rows:
+            print(f"DEBUG: First export row: {dict(rows[0])}")
+            # Convert rows to list of dictionaries
+            data_rows = [dict(row) for row in rows]
+            df = pd.DataFrame(data_rows)
+        else:
+            print("DEBUG: Export query returned no rows")
+            # Create empty DataFrame with correct structure
+            df = pd.DataFrame(columns=[
+                "id_regiao", "data_hora", "matricula", "num_frota", "protocolo",
+                "funcionario", "local", "estado", "observacoes", "hora_inicio", 
+                "hora_fim", "extra_autorizada", "verificacao_limpeza", 
+                "comentarios_verificacao", "regiao"
+            ])
+            
+    except Exception as manual_e:
+        print(f"DEBUG: Manual export query failed: {manual_e}")
         conn.close()
-        raise test_e
-    
-    df = pd.read_sql_query(final_sql, conn, params=params)
+        raise manual_e
     print(f"DEBUG: DataFrame shape after pandas: {df.shape}")
     if not df.empty:
         print(f"DEBUG: DataFrame columns: {list(df.columns)}")
