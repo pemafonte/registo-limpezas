@@ -2942,10 +2942,9 @@ def protocolo_novo():
         conn = get_conn()
         cur = conn.cursor()
         try:
-            cur.execute(
-                "INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo, custo_limpeza) VALUES (?,?,?,?,?)",
-                (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza),
-            )
+            cur.execute(fix_sql_placeholders(
+                "INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo, custo_limpeza) VALUES (?,?,?,?,?)"
+            ), (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza))
             conn.commit()
             flash("Protocolo criado com sucesso.", "info")
             return redirect(url_for("protocolos"))
@@ -3121,10 +3120,9 @@ def admin_run_migrations():
     # Handle both SQLite (tuple) and PostgreSQL (dict-like) results
     qtd = result[0] if isinstance(result, tuple) else list(result.values())[0]
     if qtd == 0:
-        conn.executemany(
-            "INSERT INTO protocolos (nome, ativo) VALUES (?,1);",
-            [("Interior Básico",), ("Exterior Completo",), ("Desinfeção",)]
-        )
+        conn.executemany(fix_sql_placeholders(
+            "INSERT INTO protocolos (nome, ativo) VALUES (?,1);"
+        ), [("Interior Básico",), ("Exterior Completo",), ("Desinfeção",)])
         conn.commit()
         done.append("Protocolos base inseridos")
 
@@ -3172,10 +3170,9 @@ def solicitar_autorizacao(viatura_id):
         WHERE viatura_id=? AND funcionario_id=? AND {today_condition} AND validado=0
     """, (viatura_id, funcionario_id))
     if not cur.fetchone():
-        cur.execute(
-            "INSERT INTO pedidos_autorizacao (viatura_id, num_frota, funcionario_id, destinatario_id) VALUES (?,?,?,?)",
-            (viatura_id, num_frota, funcionario_id, destinatario_id)
-        )
+        cur.execute(fix_sql_placeholders(
+            "INSERT INTO pedidos_autorizacao (viatura_id, num_frota, funcionario_id, destinatario_id) VALUES (?,?,?,?)"
+        ), (viatura_id, num_frota, funcionario_id, destinatario_id))
         conn.commit()
         flash("Pedido de autorização enviado ao gestor da região.", "info")
     else:
@@ -3382,10 +3379,9 @@ def novo_registo():
             while path.exists():
                 path = day_dir / f"{stem}_{i}{suf}"; i += 1
             f.save(path)
-            cur.execute(
-                "INSERT INTO anexos (registo_id, caminho, tipo) VALUES (?, ?, ?)",
-                (registo_id, str(path.relative_to(BASE_DIR)), "foto" if suf.lower() != ".pdf" else "pdf")
-            )
+            cur.execute(fix_sql_placeholders(
+                "INSERT INTO anexos (registo_id, caminho, tipo) VALUES (?, ?, ?)"
+            ), (registo_id, str(path.relative_to(BASE_DIR)), "foto" if suf.lower() != ".pdf" else "pdf"))
 
     if pedido_autorizado:
         today_condition = sql_today_condition(conn, "data_pedido")
@@ -3843,9 +3839,9 @@ def admin_role_new():
             flash("Nome do perfil obrigatório.", "danger"); return redirect(url_for("admin_role_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
-            cur.execute("INSERT INTO roles (name) VALUES (?)", (name,))
+            cur.execute(fix_sql_placeholders("INSERT INTO roles (name) VALUES (?)"), (name,))
             role_id = cur.lastrowid
-            cur.executemany("INSERT INTO role_permissions (role_id, perm) VALUES (?,?)", [(role_id, p) for p in perms])
+            cur.executemany(fix_sql_placeholders("INSERT INTO role_permissions (role_id, perm) VALUES (?,?)"), [(role_id, p) for p in perms])
             conn.commit(); flash("Perfil criado.", "info")
             return redirect(url_for("admin_roles"))
         except sqlite3.IntegrityError:
@@ -3870,7 +3866,7 @@ def admin_alterar_regiao_viatura():
         viatura_id = request.form.get("viatura_id")
         nova_regiao = request.form.get("nova_regiao", "").strip()
         if viatura_id and nova_regiao:
-            cur.execute("UPDATE viaturas SET regiao=? WHERE id=?", (nova_regiao, viatura_id))
+            cur.execute(fix_sql_placeholders("UPDATE viaturas SET regiao=? WHERE id=?"), (nova_regiao, viatura_id))
             conn.commit()
             flash("Região da viatura atualizada.", "success")
         else:
@@ -3939,8 +3935,8 @@ def admin_import_viaturas():
                             (num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, ex["id"]))
                 upd += 1
             else:
-                cur.execute("""INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
-                               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                cur.execute(fix_sql_placeholders("""INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
+                               VALUES (?,?,?,?,?,?,?,?,?,?)"""),
                             (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo))
                 ins += 1
         conn.commit(); conn.close()
@@ -3980,7 +3976,7 @@ def admin_protocolos_new():
         flash("Indica um nome para o protocolo.", "warning")
         return redirect(url_for("admin_protocolos"))
     conn = get_conn()
-    conn.execute("INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);",
+    conn.execute(fix_sql_placeholders("INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);"),
                 (nome, conteudo))
     conn.commit()
     flash("Protocolo criado.", "success")
@@ -3994,7 +3990,7 @@ def admin_protocolos_edit(pid):
     conteudo = request.form.get("conteudo", "").strip()
     ativo = 1 if request.form.get("ativo") == "on" else 0
     conn = get_conn()
-    conn.execute("UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;",
+    conn.execute(fix_sql_placeholders("UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;"),
                 (nome, conteudo, ativo, pid))
     conn.commit()
     flash("Protocolo atualizado.", "success")
@@ -4008,9 +4004,9 @@ def protocolo_apagar(pid: int):
     cur = conn.cursor()
     try:
         # Limpar referências ao protocolo nas viaturas
-        cur.execute("UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)", (pid,))
+        cur.execute(fix_sql_placeholders("UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)"), (pid,))
         # Apagar o protocolo
-        cur.execute("DELETE FROM protocolos WHERE id=?", (pid,))
+        cur.execute(fix_sql_placeholders("DELETE FROM protocolos WHERE id=?"), (pid,))
         conn.commit()
         conn.close()
         flash("Protocolo eliminado.", "success")
