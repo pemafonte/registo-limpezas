@@ -3211,6 +3211,9 @@ def novo_registo():
             viaturas_sql += " AND regiao = ?"
             viaturas_params.append(regiao_operador)
         viaturas_sql += " ORDER BY matricula"
+        
+        # Fix parameter placeholders for PostgreSQL
+        viaturas_sql = fix_sql_placeholders(conn, viaturas_sql)
         cur.execute(viaturas_sql, viaturas_params)
         vs = [dict(row) for row in cur.fetchall()]
 
