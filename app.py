@@ -640,7 +640,7 @@ def sql_placeholder(conn):
 def sql_datetime(conn, field):
     """Helper para função datetime() compatível com PostgreSQL e SQLite"""
     if is_postgres(conn):
-        return f"({field})::timestamp"  # PostgreSQL: cast to timestamp
+        return f"({field})::timestamp::text"  # PostgreSQL: cast to timestamp then to text
     else:
         return f"datetime({field})"  # SQLite: função datetime()
 
@@ -1789,7 +1789,12 @@ def home():
         iso = last_any.get(v["id"])
         if not iso:
            continue
-        dt = datetime.fromisoformat(iso).date()
+        # Handle both string (SQLite) and datetime (PostgreSQL) formats
+        if isinstance(iso, str):
+            dt = datetime.fromisoformat(iso).date()
+        else:
+            # Assume it's already a datetime object from PostgreSQL
+            dt = iso.date() if hasattr(iso, 'date') else iso
         dias_por_viatura.append((hoje - dt).days)
     media_dias_ultima = round(sum(dias_por_viatura)/len(dias_por_viatura), 2) if dias_por_viatura else 0.0
     total_viaturas = len(viaturas)
