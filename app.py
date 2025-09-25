@@ -3120,7 +3120,7 @@ def admin_run_migrations():
     # Handle both SQLite (tuple) and PostgreSQL (dict-like) results
     qtd = result[0] if isinstance(result, tuple) else list(result.values())[0]
     if qtd == 0:
-        conn.executemany(fix_sql_placeholders(
+        conn.executemany(fix_sql_placeholders(conn,
             "INSERT INTO protocolos (nome, ativo) VALUES (?,1);"
         ), [("Interior Básico",), ("Exterior Completo",), ("Desinfeção",)])
         conn.commit()
@@ -3165,12 +3165,12 @@ def solicitar_autorizacao(viatura_id):
 
     # Verifica se já existe pedido pendente hoje
     today_condition = sql_today_condition(conn, "data_pedido")
-    cur.execute(f"""
+    cur.execute(fix_sql_placeholders(conn, f"""
         SELECT 1 FROM pedidos_autorizacao
         WHERE viatura_id=? AND funcionario_id=? AND {today_condition} AND validado=0
-    """, (viatura_id, funcionario_id))
+    """), (viatura_id, funcionario_id))
     if not cur.fetchone():
-        cur.execute(fix_sql_placeholders(
+        cur.execute(fix_sql_placeholders(conn,
             "INSERT INTO pedidos_autorizacao (viatura_id, num_frota, funcionario_id, destinatario_id) VALUES (?,?,?,?)"
         ), (viatura_id, num_frota, funcionario_id, destinatario_id))
         conn.commit()
@@ -3356,13 +3356,13 @@ def novo_registo():
 
     registo_id = cur.lastrowid
     # Preencher tipo_protocolo na viatura
-    cur.execute("""
+    cur.execute(fix_sql_placeholders(conn, """
         UPDATE viaturas
         SET tipo_protocolo = (
             SELECT nome FROM protocolos WHERE id = ?
         )
         WHERE id = ?
-    """, (protocolo_id, viatura_id))
+    """), (protocolo_id, viatura_id))
 
     # anexos
     files = request.files.getlist("ficheiros")
@@ -3379,16 +3379,16 @@ def novo_registo():
             while path.exists():
                 path = day_dir / f"{stem}_{i}{suf}"; i += 1
             f.save(path)
-            cur.execute(fix_sql_placeholders(
+            cur.execute(fix_sql_placeholders(conn,
                 "INSERT INTO anexos (registo_id, caminho, tipo) VALUES (?, ?, ?)"
             ), (registo_id, str(path.relative_to(BASE_DIR)), "foto" if suf.lower() != ".pdf" else "pdf"))
 
     if pedido_autorizado:
         today_condition = sql_today_condition(conn, "data_pedido")
-        cur.execute(f"""
+        cur.execute(fix_sql_placeholders(conn, f"""
             DELETE FROM pedidos_autorizacao
             WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
-        """, (viatura_id, funcionario_id))
+        """), (viatura_id, funcionario_id))
     conn.commit()
     conn.close()
     flash(f"Registo #{registo_id} criado com sucesso.", "info")
