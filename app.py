@@ -3117,7 +3117,9 @@ def admin_run_migrations():
     conn.commit()
 
     # Seed opcional de protocolos (só se estiver vazio)
-    qtd = conn.execute("SELECT COUNT(*) FROM protocolos;").fetchone()[0]
+    result = conn.execute("SELECT COUNT(*) FROM protocolos;").fetchone()
+    # Handle both SQLite (tuple) and PostgreSQL (dict-like) results
+    qtd = result[0] if isinstance(result, tuple) else list(result.values())[0]
     if qtd == 0:
         conn.executemany(
             "INSERT INTO protocolos (nome, ativo) VALUES (?,1);",
@@ -3265,7 +3267,10 @@ def novo_registo():
     """
     sql = fix_sql_placeholders(conn, sql)
     cur.execute(sql, (viatura_id,))
-    ja_limpo_hoje = cur.fetchone()[0] > 0
+    result = cur.fetchone()
+    # Handle both SQLite (tuple) and PostgreSQL (dict-like) results  
+    count_value = result[0] if isinstance(result, tuple) else list(result.values())[0]
+    ja_limpo_hoje = count_value > 0
 
     pedido_autorizado = pedido_autorizado_hoje(viatura_id, funcionario_id)
     extra_autorizada = 1 if pedido_autorizado else 0
