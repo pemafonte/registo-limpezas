@@ -1991,6 +1991,177 @@ def pedidos_autorizacao():
     conn.close()
     return render_template("pedidos_autorizacao.html", pedidos=pedidos, signature=APP_SIGNATURE)
 
+@app.route("/api/pedidos_pendentes")
+@login_required
+@require_perm("dashboard:view")
+def api_pedidos_pendentes():
+    """API endpoint para buscar pedidos pendentes (para auto-refresh)"""
+    user_role = session.get("role")
+    user_id = session.get("user_id")
+    
+    if user_role not in ["admin", "gestor"]:
+        return {"pedidos": []}
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    ph = sql_placeholder(conn)
+    today_condition = sql_today_condition(conn, "pa.data_pedido")
+    
+    cur.execute(f"""
+        SELECT pa.id, v.matricula, v.num_frota, f.nome as operador, pa.data_pedido
+        FROM pedidos_autorizacao pa
+        JOIN viaturas v ON v.id = pa.viatura_id
+        JOIN funcionarios f ON f.id = pa.funcionario_id
+        WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
+        ORDER BY pa.data_pedido DESC
+    """, (user_id,))
+    
+    pedidos = []
+    for row in cur.fetchall():
+        pedidos.append({
+            "id": row["id"],
+            "matricula": row["matricula"],
+            "num_frota": row["num_frota"],
+            "operador": row["operador"],
+            "data_pedido": row["data_pedido"].strftime("%H:%M") if row["data_pedido"] else ""
+        })
+    
+    conn.close()
+    return {"pedidos": pedidos, "count": len(pedidos)}
+
+@app.route("/auto-refresh.js")
+def auto_refresh_js():
+    """Serve JavaScript para auto-refresh dos pedidos pendentes"""
+    js_content = """
+// Auto-refresh para pedidos pendentes no dashboard
+(function() {
+    let refreshInterval;
+    let lastCount = 0;
+    
+    function updatePedidosPendentes() {
+        fetch('/api/pedidos_pendentes')
+            .then(response => response.json())
+            .then(data => {
+                const container = document.getElementById('pedidos-pendentes-container');
+                if (!container) return;
+                
+                // Se o número de pedidos mudou, atualiza a interface
+                if (data.count !== lastCount) {
+                    lastCount = data.count;
+                    
+                    // Atualiza o contador no badge
+                    const badge = document.querySelector('.pedidos-badge');
+                    if (badge) {
+                        badge.textContent = data.count;
+                        badge.style.display = data.count > 0 ? 'inline' : 'none';
+                    }
+                    
+                    // Atualiza a lista de pedidos
+                    if (data.pedidos.length > 0) {
+                        let html = '<div class="alert alert-warning"><h5>Pedidos de Autorização Pendentes:</h5><ul>';
+                        data.pedidos.forEach(p => {
+                            html += `<li><strong>${p.matricula}</strong> (${p.num_frota}) - ${p.operador}`;
+                            html += ` <small>(${p.data_pedido})</small>`;
+                            html += ` <a href="/validar_pedido_autorizacao/${p.id}" class="btn btn-sm btn-success" onclick="return confirm('Autorizar limpeza extra?')">Autorizar</a></li>`;
+                        });
+                        html += '</ul></div>';
+                        container.innerHTML = html;
+                    } else {
+                        container.innerHTML = '';
+                    }
+                    
+                    // Atualiza título da página
+                    const originalTitle = document.title.replace(/^\(\d+\) /, '');
+                    if (data.count > 0) {
+                        document.title = `(${data.count}) ${originalTitle}`;
+                    } else {
+                        document.title = originalTitle;
+                    }
+                    
+                    // Mostra notificação se há novos pedidos e notificações estão ativadas
+                    if (data.count > 0 && window.lastNotifiedCount !== data.count && notificationsEnabled()) {
+                        showNotification(`${data.count} pedido(s) de autorização pendente(s)`);
+                        window.lastNotifiedCount = data.count;
+                    }
+                }
+            })
+            .catch(error => console.log('Erro ao buscar pedidos:', error));
+    }
+    
+    function showNotification(message) {
+        // Cria notificação visual simples
+        const notification = document.createElement('div');
+        notification.className = 'alert alert-info alert-dismissible';
+        notification.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 1050; min-width: 300px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);';
+        notification.innerHTML = `
+            <strong>🔔 Nova solicitação!</strong> ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" onclick="this.parentElement.remove()"></button>
+        `;
+        document.body.appendChild(notification);
+        
+        // Tenta tocar som de notificação (se permitido pelo browser)
+        try {
+            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hUEAtGn+Lvt2UnAC+C1/HHdSsFKH/N8Nh+NgUZab3o45JAEApRo+PwuGIaAjOH2fPBCy0EJHjI7Ox9OAUWVbLm4x1LFAtKq+3tv2IkAyh9VPHBdOEWvvz25'></audio>");
+            audio.volume = 0.3;
+            audio.play().catch(() => {}); // Ignora erros se som não funcionar
+        } catch (e) {}
+        
+        // Remove após 8 segundos
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 8000);
+    }
+    
+    // Função para alternar notificações
+    window.toggleNotifications = function() {
+        const enabled = localStorage.getItem('notificationsEnabled') !== 'false';
+        localStorage.setItem('notificationsEnabled', (!enabled).toString());
+        const btn = document.getElementById('toggle-notifications-btn');
+        if (btn) {
+            btn.textContent = enabled ? '🔔 Ativar Notificações' : '🔕 Desativar Notificações';
+            btn.className = enabled ? 'btn btn-outline-secondary btn-sm' : 'btn btn-warning btn-sm';
+        }
+        return !enabled;
+    };
+    
+    // Verifica se notificações estão habilitadas
+    function notificationsEnabled() {
+        return localStorage.getItem('notificationsEnabled') !== 'false';
+    }
+    
+    // Inicia o auto-refresh quando a página carrega
+    document.addEventListener('DOMContentLoaded', function() {
+        // Verifica se estamos na página do dashboard
+        if (window.location.pathname === '/' || window.location.pathname === '/home') {
+            // Adiciona botão para controlar notificações
+            const nav = document.querySelector('.navbar-nav');
+            if (nav && !document.getElementById('toggle-notifications-btn')) {
+                const li = document.createElement('li');
+                li.className = 'nav-item';
+                const enabled = notificationsEnabled();
+                li.innerHTML = `<button id="toggle-notifications-btn" class="${enabled ? 'btn btn-warning btn-sm' : 'btn btn-outline-secondary btn-sm'}" onclick="toggleNotifications()" style="margin: 5px;">${enabled ? '🔕 Desativar Notificações' : '🔔 Ativar Notificações'}</button>`;
+                nav.appendChild(li);
+            }
+            
+            updatePedidosPendentes(); // Primeira verificação
+            refreshInterval = setInterval(updatePedidosPendentes, 30000); // A cada 30 segundos
+        }
+    });
+    
+    // Para o refresh quando sair da página
+    window.addEventListener('beforeunload', function() {
+        if (refreshInterval) {
+            clearInterval(refreshInterval);
+        }
+    });
+})();
+"""
+    response = Response(js_content, mimetype='application/javascript')
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
 @app.route("/validar_pedido_autorizacao/<int:pedido_id>", methods=["POST"])
 @login_required
 @require_perm("dashboard:view")
