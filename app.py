@@ -2388,7 +2388,7 @@ def exportar_viaturas_csv():
     w.writerow(headers)
     for r in rows:
         w.writerow([
-            r["matricula"], r["numero_frota"] or "", r["regiao"] or "", r["operacao"] or "",
+            r["matricula"], r["num_frota"] or "", r["regiao"] or "", r["operacao"] or "",
             r["marca"] or "", r["modelo"] or "", r["tipo_protocolo"] or "",
             "Sim" if int(r["ativo"] or 0) else "Não", r["descricao"] or "", r["filial"] or "",
             r["num_frota"] or "", r["criado_em"] or "", r["id"],
