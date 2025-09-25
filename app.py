@@ -659,6 +659,20 @@ def sql_today_condition(conn, date_field):
     else:
         return f"date({date_field}) = date('now','localtime')"
 
+def sql_month_format(conn, date_field):
+    """Retorna função SQL para formatar data como YYYY-MM"""
+    if is_postgres(conn):
+        return f"TO_CHAR({date_field}, 'YYYY-MM')"
+    else:
+        return f"strftime('%Y-%m', {date_field})"
+
+def sql_date(conn, date_field):
+    """Retorna função SQL para extrair data de um timestamp"""
+    if is_postgres(conn):
+        return f"({date_field})::date"
+    else:
+        return f"date({date_field})"
+
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
 
@@ -1529,10 +1543,8 @@ def home():
     # Helper para adicionar filtro de região e mês
     def filtro_mes_regiao(sql, params, alias_registos="r", alias_viaturas="v"):
         if mes:
-            if is_postgres(conn):
-                sql += f" AND TO_CHAR({alias_registos}.data_hora, 'YYYY-MM') = {ph}"
-            else:
-                sql += f" AND strftime('%Y-%m', {alias_registos}.data_hora) = {ph}"
+            month_format = sql_month_format(conn, f"{alias_registos}.data_hora")
+            sql += f" AND {month_format} = {ph}"
             params.append(mes)
         if regiao_gestor:
             sql += f" AND {alias_viaturas}.regiao = {ph}"
@@ -2184,8 +2196,9 @@ def viaturas():
                 v[f"dias_{nome.replace(' ', '_').lower()}"] = None
                 v[f"freq_{nome.replace(' ', '_').lower()}"] = None
                 continue
+            date_sql = sql_date(conn, "r.data_hora")
             cur.execute(f"""
-                SELECT MAX(date(r.data_hora)) as ult
+                SELECT MAX({date_sql}) as ult
                 FROM registos_limpeza r
                 WHERE r.viatura_id={ph} AND r.protocolo_id={ph}
             """, (v["id"], prot["id"]))
@@ -3170,8 +3183,9 @@ def exportar_contabilidade_excel():
 
     conn = get_conn()
     cur = conn.cursor()
-    sql = """
-        SELECT date(r.data_hora) as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
+    date_sql = sql_date(conn, "r.data_hora") 
+    sql = f"""
+        SELECT {date_sql} as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
         JOIN protocolos p ON p.id = r.protocolo_id
@@ -3180,7 +3194,8 @@ def exportar_contabilidade_excel():
     """
     params = []
     if mes:
-        sql += " AND strftime('%Y-%m', r.data_hora) = ?"
+        month_format = sql_month_format(conn, "r.data_hora")
+        sql += f" AND {month_format} = ?"
         params.append(mes)
     if protocolo_id:
         sql += " AND p.id = ?"
@@ -3588,8 +3603,9 @@ def contabilidade():
 
     conn = get_conn()
     cur = conn.cursor()
-    sql = """
-        SELECT r.id as registo_id, date(r.data_hora) as data, 
+    date_sql = sql_date(conn, "r.data_hora")
+    sql = f"""
+        SELECT r.id as registo_id, {date_sql} as data, 
                COALESCE(r.regiao, v.regiao) as regiao, 
                v.matricula, v.num_frota,
                p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
@@ -3601,7 +3617,8 @@ def contabilidade():
     """
     params = []
     if mes:
-        sql += " AND strftime('%Y-%m', r.data_hora) = ?"
+        month_format = sql_month_format(conn, "r.data_hora")
+        sql += f" AND {month_format} = ?"
         params.append(mes)
     if protocolo_id:
         sql += " AND p.id = ?"
