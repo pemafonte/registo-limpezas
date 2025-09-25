@@ -3150,6 +3150,8 @@ def solicitar_autorizacao(viatura_id):
     num_frota = row["num_frota"] if row else None
 
     destinatario_id = None
+    
+    # Primeiro tenta encontrar gestor na mesma região
     if regiao:
         sql = "SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1 AND regiao=?"
         sql = fix_sql_placeholders(conn, sql)
@@ -3157,9 +3159,27 @@ def solicitar_autorizacao(viatura_id):
         gestor = cur.fetchone()
         if gestor:
             destinatario_id = gestor["id"]
+    
+    # Se não encontrou gestor na região, procura qualquer gestor ativo
+    if not destinatario_id:
+        sql = "SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql)
+        gestor = cur.fetchone()
+        if gestor:
+            destinatario_id = gestor["id"]
+    
+    # Se ainda não encontrou, tenta administradores
+    if not destinatario_id:
+        sql = "SELECT id FROM funcionarios WHERE role='admin' AND ativo=1"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql)
+        admin = cur.fetchone()
+        if admin:
+            destinatario_id = admin["id"]
 
     if not destinatario_id:
-        flash("Não foi possível identificar o gestor destinatário para esta viatura.", "danger")
+        flash("Não foi possível identificar um gestor ou administrador para autorizar esta solicitação. Contacte o administrador do sistema.", "danger")
         conn.close()
         return redirect(url_for("novo_registo"))
 
@@ -3221,7 +3241,7 @@ def novo_registo():
         today_condition_limpeza = sql_today_condition(conn, "data_hora")
         cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
-        cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
+        cur.execute(fix_sql_placeholders(conn, "SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1"))
         gestores = [dict(row) for row in cur.fetchall()]
         # Viaturas autorizadas a limpeza extra hoje
         today_condition_pedido = sql_today_condition(conn, "data_pedido")
@@ -3308,7 +3328,7 @@ def novo_registo():
         today_condition_limpeza = sql_today_condition(conn, "data_hora")
         cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
-        cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
+        cur.execute(fix_sql_placeholders(conn, "SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1"))
         gestores = [dict(row) for row in cur.fetchall()]
         today_condition_pedido = sql_today_condition(conn, "data_pedido")
         cur.execute(f"""
