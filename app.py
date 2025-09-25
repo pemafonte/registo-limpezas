@@ -3485,78 +3485,137 @@ def download_anexo(anexo_id: int):
 @app.route("/exportar_contabilidade_excel")
 @login_required
 def exportar_contabilidade_excel():
-    from pandas_config import PANDAS_AVAILABLE, pd
-    
-    if not PANDAS_AVAILABLE:
-        flash("Funcionalidade Excel não está disponível no momento.", "error")
-        return redirect(url_for("contabilidade"))
-    mes = request.args.get("mes")
-    protocolo_id = request.args.get("protocolo_id")
-    regiao = request.args.get("regiao")
-    empresa = request.args.get("empresa")
+    try:
+        from pandas_config import PANDAS_AVAILABLE, pd
+        
+        if not PANDAS_AVAILABLE:
+            print("DEBUG: Pandas não está disponível")
+            flash("Funcionalidade Excel não está disponível no momento.", "error")
+            return redirect(url_for("contabilidade"))
+            
+        print("DEBUG: Iniciando exportação contabilidade Excel")
+        
+        mes = request.args.get("mes")
+        protocolo_id = request.args.get("protocolo_id")
+        regiao = request.args.get("regiao")
+        empresa = request.args.get("empresa")
 
-    # Só admin pode exportar todas as regiões
-    user_id = session.get("user_id")
-    user_role = session.get("role")
-    regiao_user = None
-    if user_role in ("gestor",):
+        print(f"DEBUG: Parâmetros - mes: {mes}, protocolo_id: {protocolo_id}, regiao: {regiao}, empresa: {empresa}")
+
+        # Só admin pode exportar todas as regiões
+        user_id = session.get("user_id")
+        user_role = session.get("role")
+        regiao_user = None
+        if user_role in ("gestor",):
+            conn = get_conn()
+            cur = conn.cursor()
+            placeholder = sql_placeholder(conn)
+            cur.execute(f"SELECT regiao FROM funcionarios WHERE id={placeholder}", (user_id,))
+            row = cur.fetchone()
+            regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
+            conn.close()
+            regiao = regiao_user  # força filtro pela região do gestor
+            print(f"DEBUG: Gestor região limitada a: {regiao}")
+
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
-        row = cur.fetchone()
-        regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
+        
+        # Check database type for debugging
+        is_pg = is_postgres(conn)
+        print(f"DEBUG: Using PostgreSQL: {is_pg}")
+        
+        date_sql = sql_date(conn, "r.data_hora") 
+        placeholder = sql_placeholder(conn)
+        
+        sql = f"""
+            SELECT {date_sql} as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
+            FROM registos_limpeza r
+            JOIN viaturas v ON v.id = r.viatura_id
+            JOIN protocolos p ON p.id = r.protocolo_id
+            JOIN funcionarios f ON f.id = r.funcionario_id
+            WHERE 1=1
+        """
+        params = []
+        param_counter = 1
+        
+        if mes:
+            month_format = sql_month_format(conn, "r.data_hora")
+            if is_pg:
+                sql += f" AND {month_format} = ${param_counter}"
+                param_counter += 1
+            else:
+                sql += f" AND {month_format} = ?"
+            params.append(mes)
+            
+        if protocolo_id:
+            if is_pg:
+                sql += f" AND p.id = ${param_counter}"
+                param_counter += 1
+            else:
+                sql += " AND p.id = ?"
+            params.append(protocolo_id)
+            
+        if regiao:
+            if is_pg:
+                sql += f" AND v.regiao = ${param_counter}"
+                param_counter += 1
+            else:
+                sql += " AND v.regiao = ?"
+            params.append(regiao)
+            
+        if empresa:
+            if is_pg:
+                sql += f" AND f.empresa = ${param_counter}"
+                param_counter += 1
+            else:
+                sql += " AND f.empresa = ?"
+            params.append(empresa) 
+
+        # Use sql_date helper for cross-database compatibility
+        order_date_sql = sql_date(conn, "r.data_hora")
+        sql += f" ORDER BY v.regiao ASC, {order_date_sql} ASC, r.id ASC"
+        
+        print(f"DEBUG: SQL query for contabilidade export: {sql}")
+        print(f"DEBUG: Parameters: {params}")
+        
+        df = pd.read_sql_query(sql, conn, params=params)
+        print(f"DEBUG: DataFrame shape: {df.shape}")
         conn.close()
-        regiao = regiao_user  # força filtro pela região do gestor
 
-    conn = get_conn()
-    cur = conn.cursor()
-    date_sql = sql_date(conn, "r.data_hora") 
-    sql = f"""
-        SELECT {date_sql} as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
-        FROM registos_limpeza r
-        JOIN viaturas v ON v.id = r.viatura_id
-        JOIN protocolos p ON p.id = r.protocolo_id
-        JOIN funcionarios f ON f.id = r.funcionario_id
-        WHERE 1=1
-    """
-    params = []
-    if mes:
-        month_format = sql_month_format(conn, "r.data_hora")
-        sql += f" AND {month_format} = ?"
-        params.append(mes)
-    if protocolo_id:
-        sql += " AND p.id = ?"
-        params.append(protocolo_id)
-    if regiao:
-        sql += " AND v.regiao = ?"
-        params.append(regiao)
-    if empresa:
-        sql += " AND f.empresa = ?"
-        params.append(empresa) 
+        # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
+        if not df.empty:
+            print("DEBUG: Processando DataFrame...")
+            df = df.sort_values(["regiao", "data"])
+            df["id_regiao"] = (
+                df.groupby("regiao").cumcount() + 1
+            ).apply(lambda x: f"{x:03d}")
+            df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
+            # Ordena para exportar do mais recente para o mais antigo
+            df = df.sort_values(["data"], ascending=[False])
+            print("DEBUG: DataFrame processado com sucesso")
+        else:
+            print("DEBUG: DataFrame vazio")
 
-    sql += " ORDER BY v.regiao ASC, date(r.data_hora) ASC, r.id ASC"
-    df = pd.read_sql_query(sql, conn, params=params)
-    conn.close()
+        cols = [
+            "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
+            "custo_limpeza", "funcionario", "empresa", "local"
+        ]
+        df = df[cols]
 
-    # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
-    if not df.empty:
-        df = df.sort_values(["regiao", "data"])
-        df["id_regiao"] = (
-            df.groupby("regiao").cumcount() + 1
-        ).apply(lambda x: f"{x:03d}")
-        df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
-        # Ordena para exportar do mais recente para o mais antigo
-        df = df.sort_values(["data"], ascending=[False])
-
-    cols = [
-        "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
-        "custo_limpeza", "funcionario", "empresa", "local"
-    ]
-    df = df[cols]
-
-    fname = EXPORT_DIR / f"contabilidade_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    df.to_excel(fname, index=False, sheet_name="Contabilidade")
-    return send_file(fname, as_attachment=True)
+        print("DEBUG: Criando arquivo Excel...")
+        fname = EXPORT_DIR / f"contabilidade_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df.to_excel(fname, index=False, sheet_name="Contabilidade")
+        print(f"DEBUG: Arquivo criado: {fname}")
+        
+        return send_file(fname, as_attachment=True)
+        
+    except Exception as e:
+        print(f"❌ ERRO na exportação contabilidade Excel: {str(e)}")
+        print(f"❌ Tipo do erro: {type(e).__name__}")
+        import traceback
+        print(f"❌ Traceback completo: {traceback.format_exc()}")
+        flash(f"Erro na exportação: {str(e)}", "error")
+        return redirect(url_for("contabilidade"))
 # -----------------------------------------------------------------------------
 # Administração (utilizadores, perfis, import de viaturas)
 # -----------------------------------------------------------------------------
