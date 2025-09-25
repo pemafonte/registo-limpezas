@@ -2990,11 +2990,11 @@ def protocolo_editar(pid: int):
             return redirect(url_for("protocolo_editar", pid=pid))
 
         try:
-            cur.execute("""
+            cur.execute(fix_sql_placeholders("""
                 UPDATE protocolos
                    SET nome=?, passos_json=?, frequencia_dias=?, ativo=?, custo_limpeza=?
                  WHERE id=?
-            """, (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza, pid))
+            """), (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza, pid))
             if cur.rowcount == 0:
                 flash("Protocolo não encontrado.", "danger")
             else:
@@ -3467,7 +3467,7 @@ def registo_apagar(rid: int):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("DELETE FROM registos_limpeza WHERE id=?", (rid,))
+        cur.execute(fix_sql_placeholders("DELETE FROM registos_limpeza WHERE id=?"), (rid,))
         conn.commit()
         conn.close()
         flash("Registo eliminado.", "success")
@@ -3486,7 +3486,7 @@ def registo_apagar(rid: int):
 def ver_anexos(registo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id", (registo_id,))
+    cur.execute(fix_sql_placeholders("SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id"), (registo_id,))
     anex = [dict(r) for r in cur.fetchall()]
     conn.close()
     return render_template("anexos.html", registo_id=registo_id, anexos=anex, signature=APP_SIGNATURE)
@@ -3497,7 +3497,7 @@ def ver_anexos(registo_id: int):
 def download_anexo(anexo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT caminho FROM anexos WHERE id=?", (anexo_id,))
+    cur.execute(fix_sql_placeholders("SELECT caminho FROM anexos WHERE id=?"), (anexo_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -3688,7 +3688,7 @@ def admin_user_toggle(user_id):
         flash("Não pode desativar a sua própria conta.", "warning")
         return redirect(url_for("admin_users"))
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT role, ativo FROM funcionarios WHERE id=?", (user_id,))
+    cur.execute(fix_sql_placeholders("SELECT role, ativo FROM funcionarios WHERE id=?"), (user_id,))
     u = cur.fetchone()
     if not u:
         conn.close(); flash("Utilizador não encontrado.", "danger"); return redirect(url_for("admin_users"))
@@ -3710,7 +3710,7 @@ def admin_user_toggle(user_id):
 @require_perm("users:manage")
 def admin_user_reset_password(user_id):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT id, username, nome FROM funcionarios WHERE id=?", (user_id,))
+    cur.execute(fix_sql_placeholders("SELECT id, username, nome FROM funcionarios WHERE id=?"), (user_id,))
     user = cur.fetchone()
     if not user:
         conn.close()
@@ -3926,7 +3926,7 @@ def admin_import_viaturas():
             ativo = row.get("ativo") or row.get("ATIVO")
             ativo = 1 if str(ativo).strip().lower() in {"1","true","sim","yes","y"} else 1  # default 1
 
-            cur.execute("SELECT id FROM viaturas WHERE matricula=?", (matricula,))
+            cur.execute(fix_sql_placeholders("SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
             ex = cur.fetchone()
             if ex:
                 cur.execute("""UPDATE viaturas
@@ -3956,7 +3956,7 @@ def admin_utilizadores_delete(user_id):
     if not session.get("is_admin"):
         return redirect(url_for("sem_permissao"))
     conn = get_conn()
-    conn.execute("DELETE FROM utilizadores WHERE id = ?;", (user_id,))
+    conn.execute(fix_sql_placeholders("DELETE FROM utilizadores WHERE id = ?;"), (user_id,))
     conn.commit()
     flash("Utilizador eliminado com sucesso.", "success")
     return redirect(url_for("admin_utilizadores"))
