@@ -3259,10 +3259,12 @@ def novo_registo():
     
     # Verifica se já foi limpa hoje
     today_condition = sql_today_condition(conn, "data_hora")
-    cur.execute(f"""
+    sql = f"""
         SELECT COUNT(*) FROM registos_limpeza
         WHERE viatura_id = ? AND {today_condition}
-    """, (viatura_id,))
+    """
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (viatura_id,))
     ja_limpo_hoje = cur.fetchone()[0] > 0
 
     pedido_autorizado = pedido_autorizado_hoje(viatura_id, funcionario_id)
@@ -3388,10 +3390,12 @@ def pedido_autorizado_hoje(viatura_id, funcionario_id):
     conn = get_conn()
     cur = conn.cursor()
     today_condition = sql_today_condition(conn, "data_pedido")
-    cur.execute(f"""
+    sql = f"""
         SELECT 1 FROM pedidos_autorizacao
          WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
-    """, (viatura_id, funcionario_id))
+    """
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (viatura_id, funcionario_id))
     res = cur.fetchone()
     conn.close()
     return bool(res)
