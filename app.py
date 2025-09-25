@@ -3588,8 +3588,18 @@ def exportar_contabilidade_excel():
         date_sql = sql_date(conn, "r.data_hora") 
         placeholder = sql_placeholder(conn)
         
+        # Build query with fallbacks for potentially missing columns
         sql = f"""
-            SELECT {date_sql} as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
+            SELECT 
+                {date_sql} as data, 
+                v.matricula, 
+                COALESCE(v.num_frota, '') as num_frota, 
+                COALESCE(v.regiao, '') as regiao, 
+                p.nome as protocolo, 
+                COALESCE(p.custo_limpeza, 0.0) as custo_limpeza, 
+                f.nome as funcionario, 
+                COALESCE(f.empresa, '') as empresa, 
+                COALESCE(r.local, '') as local
             FROM registos_limpeza r
             JOIN viaturas v ON v.id = r.viatura_id
             JOIN protocolos p ON p.id = r.protocolo_id
@@ -3625,8 +3635,36 @@ def exportar_contabilidade_excel():
         print(f"DEBUG: SQL query for contabilidade export: {sql}")
         print(f"DEBUG: Parameters: {params}")
         
+        # Test the query first with regular cursor to check for errors
+        try:
+            test_cur = conn.cursor()
+            test_cur.execute(sql, tuple(params))
+            test_results = test_cur.fetchall()
+            print(f"DEBUG: Test query returned {len(test_results)} rows")
+            if test_results:
+                print(f"DEBUG: First row: {dict(test_results[0])}")
+            else:
+                print("DEBUG: Query returned no rows - checking if tables have data...")
+                # Check if tables have any data
+                test_cur.execute("SELECT COUNT(*) as count FROM registos_limpeza")
+                registos_count = test_cur.fetchone()["count"]
+                test_cur.execute("SELECT COUNT(*) as count FROM viaturas")
+                viaturas_count = test_cur.fetchone()["count"]
+                test_cur.execute("SELECT COUNT(*) as count FROM protocolos")
+                protocolos_count = test_cur.fetchone()["count"]
+                test_cur.execute("SELECT COUNT(*) as count FROM funcionarios")
+                funcionarios_count = test_cur.fetchone()["count"]
+                print(f"DEBUG: Table counts - registos: {registos_count}, viaturas: {viaturas_count}, protocolos: {protocolos_count}, funcionarios: {funcionarios_count}")
+        except Exception as test_e:
+            print(f"DEBUG: Test query failed: {test_e}")
+            conn.close()
+            raise test_e
+        
         df = pd.read_sql_query(sql, conn, params=params)
         print(f"DEBUG: DataFrame shape: {df.shape}")
+        if not df.empty:
+            print(f"DEBUG: DataFrame columns: {list(df.columns)}")
+            print(f"DEBUG: First few rows:\n{df.head()}")
         conn.close()
 
         # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
