@@ -4107,7 +4107,7 @@ def contabilidade():
         params.append(empresa)
     datetime_order = sql_datetime(conn, "r.data_hora")
     sql += f" ORDER BY regiao ASC, {datetime_order} ASC, r.id ASC"
-    cur.execute(sql, params)
+    cur.execute(fix_sql_placeholders(conn, sql), params)
     registos = [dict(row) for row in cur.fetchall()]
 
     # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
@@ -4358,7 +4358,7 @@ def export_registos_excel():
     regiao_user = None
     if user_role in ("operador", "gestor"):
         ph = sql_placeholder(conn)
-        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (user_id,))
+        cur.execute(fix_sql_placeholders(conn, f"SELECT regiao FROM funcionarios WHERE id={ph}"), (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
 
@@ -4396,7 +4396,7 @@ def export_registos_excel():
         params.append(regiao_user)
     datetime_order = sql_datetime(conn, "r.data_hora")
     sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
-    df = pd.read_sql_query(sql, conn, params=params)
+    df = pd.read_sql_query(fix_sql_placeholders(conn, sql), conn, params=params)
     conn.close()
 
     if not df.empty:
@@ -4409,7 +4409,12 @@ def export_registos_excel():
         df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
         # Agora ordena para exportar do mais recente para o mais antigo
         df = df.sort_values(["data_hora", "id_regiao"], ascending=[False, False])
-        df["data"] = pd.to_datetime(df["data_hora"]).dt.date
+        # Handle datetime conversion more robustly for PostgreSQL compatibility
+        try:
+            df["data"] = pd.to_datetime(df["data_hora"], errors='coerce').dt.date
+        except Exception as e:
+            # Fallback: try to extract date from string format
+            df["data"] = df["data_hora"].apply(lambda x: str(x).split('T')[0] if x else None)
 
         # Calcular tempo de limpeza (em minutos)
         def calc_dur(row):
