@@ -3672,10 +3672,10 @@ def admin_user_toggle(user_id):
         cur.execute(f"SELECT COUNT(*) AS n FROM funcionarios WHERE LOWER(role)='admin' AND ativo=1 AND id<>{placeholder}", (user_id,))
         if cur.fetchone()["n"] == 0:
             conn.close(); flash("Não pode desativar o último admin ativo.", "danger"); return redirect(url_for("admin_users"))
-    if is_postgres(conn):
-        cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=$1", (user_id,))
-    else:
-        cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
+    # Use the helper function to handle parameter placeholders correctly
+    sql = "UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?"
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (user_id,))
     conn.commit(); conn.close()
     flash("Estado do utilizador atualizado.", "success")
     return redirect(url_for("admin_users"))
@@ -3696,10 +3696,10 @@ def admin_user_reset_password(user_id):
         if not new_password:
             flash("A nova password é obrigatória.", "danger")
         else:
-            if is_postgres(conn):
-                cur.execute("UPDATE funcionarios SET password=$1 WHERE id=$2", (generate_password_hash(new_password), user_id))
-            else:
-                cur.execute("UPDATE funcionarios SET password=? WHERE id=?", (generate_password_hash(new_password), user_id))
+            # Use the helper function to handle parameter placeholders correctly
+            sql = "UPDATE funcionarios SET password=? WHERE id=?"
+            sql = fix_sql_placeholders(conn, sql)
+            cur.execute(sql, (generate_password_hash(new_password), user_id))
             conn.commit()
             flash("Password redefinida com sucesso.", "success")
             conn.close()
@@ -3726,11 +3726,9 @@ def admin_user_new():
             return redirect(url_for("admin_user_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
-            placeholder = sql_placeholder(conn)
-            if is_postgres(conn):
-                sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-            else:
-                sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            # Use the helper function to handle parameter placeholders correctly
+            sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            sql = fix_sql_placeholders(conn, sql)
             
             cur.execute(
                 sql,
@@ -3767,10 +3765,9 @@ def admin_user_edit(user_id):
             flash("Username é obrigatório.", "danger"); conn.close()
             return redirect(url_for("admin_user_edit", user_id=user_id))
         try:
-            if is_postgres(conn):
-                sql = "UPDATE funcionarios SET username=$1, nome=$2, role=$3, ativo=$4, regiao=$5, email=$6, empresa=$7 WHERE id=$8"
-            else:
-                sql = "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, email=?, empresa=? WHERE id=?"
+            # Use the helper function to handle parameter placeholders correctly
+            sql = "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, email=?, empresa=? WHERE id=?"
+            sql = fix_sql_placeholders(conn, sql)
             
             cur.execute(
                 sql,
