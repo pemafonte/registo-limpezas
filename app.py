@@ -2884,24 +2884,75 @@ def ativar_desativar_viatura(viatura_id):
 @login_required
 @require_perm("viaturas:view")
 def exportar_viaturas_excel():
-    from pandas_config import PANDAS_AVAILABLE, pd
-    
-    if not PANDAS_AVAILABLE:
-        flash("Funcionalidade Excel não está disponível no momento.", "error")
+    try:
+        from pandas_config import PANDAS_AVAILABLE, pd
+        
+        if not PANDAS_AVAILABLE:
+            flash("Funcionalidade Excel não está disponível no momento.", "error")
+            return redirect(url_for("viaturas"))
+        
+        print("DEBUG: Iniciando exportação viaturas Excel")
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Check if viaturas table has data first
+        cur.execute("SELECT COUNT(*) as count FROM viaturas")
+        count_result = cur.fetchone()
+        viaturas_count = count_result["count"]
+        print(f"DEBUG: Total viaturas na tabela: {viaturas_count}")
+        
+        # Use COALESCE for potentially missing columns
+        cur.execute("""
+            SELECT 
+                id, 
+                matricula, 
+                COALESCE(num_frota, '') as num_frota, 
+                COALESCE(regiao, '') as regiao, 
+                COALESCE(operacao, '') as operacao, 
+                COALESCE(marca, '') as marca, 
+                COALESCE(modelo, '') as modelo, 
+                COALESCE(tipo_protocolo, '') as tipo_protocolo, 
+                COALESCE(descricao, '') as descricao, 
+                COALESCE(filial, '') as filial, 
+                ativo, 
+                criado_em
+            FROM viaturas
+            ORDER BY matricula
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+        print(f"DEBUG: Rows fetched from viaturas: {len(rows)}")
+        if rows:
+            print(f"DEBUG: First row: {rows[0]}")
+        
+        conn.close()
+        
+        if not rows:
+            print("DEBUG: No viaturas data - creating empty DataFrame")
+            # Create empty DataFrame with proper columns
+            df = pd.DataFrame(columns=[
+                "id", "matricula", "num_frota", "regiao", "operacao", 
+                "marca", "modelo", "tipo_protocolo", "descricao", "filial", "ativo", "criado_em"
+            ])
+        else:
+            df = pd.DataFrame(rows)
+            
+        print(f"DEBUG: DataFrame shape: {df.shape}")
+        print(f"DEBUG: DataFrame columns: {list(df.columns)}")
+        if not df.empty:
+            print(f"DEBUG: DataFrame head:\n{df.head()}")
+
+        fname = EXPORT_DIR / f"viaturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df.to_excel(fname, index=False, sheet_name="Viaturas")
+        print(f"DEBUG: Excel file created: {fname}")
+        return send_file(fname, as_attachment=True)
+        
+    except Exception as e:
+        print(f"❌ ERRO na exportação viaturas Excel: {str(e)}")
+        print(f"❌ Tipo do erro: {type(e).__name__}")
+        import traceback
+        print(f"❌ Traceback completo: {traceback.format_exc()}")
+        flash(f"Erro na exportação: {str(e)}", "error")
         return redirect(url_for("viaturas"))
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, criado_em
-        FROM viaturas
-        ORDER BY matricula
-    """)
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    df = pd.DataFrame(rows)
-    fname = EXPORT_DIR / f"viaturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    df.to_excel(fname, index=False, sheet_name="Viaturas")
-    return send_file(fname, as_attachment=True)
 # -----------------------------------------------------------------------------
 # Protocolos (listar / editar / novo)
 # -----------------------------------------------------------------------------
@@ -4425,7 +4476,31 @@ def export_registos_excel():
         params.append(regiao_user)
     datetime_order = sql_datetime(conn, "r.data_hora")
     sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
-    df = pd.read_sql_query(fix_sql_placeholders(conn, sql), conn, params=params)
+    
+    # Debug the query
+    print(f"DEBUG: Export registos SQL: {sql}")
+    print(f"DEBUG: Export registos params: {params}")
+    final_sql = fix_sql_placeholders(conn, sql)
+    print(f"DEBUG: Final SQL after placeholders: {final_sql}")
+    
+    # Test query first
+    try:
+        test_cur = conn.cursor()
+        test_cur.execute(final_sql, tuple(params))
+        test_results = test_cur.fetchall()
+        print(f"DEBUG: Test query returned {len(test_results)} rows")
+        if test_results:
+            print(f"DEBUG: First test row: {dict(test_results[0])}")
+    except Exception as test_e:
+        print(f"DEBUG: Test query failed: {test_e}")
+        conn.close()
+        raise test_e
+    
+    df = pd.read_sql_query(final_sql, conn, params=params)
+    print(f"DEBUG: DataFrame shape after pandas: {df.shape}")
+    if not df.empty:
+        print(f"DEBUG: DataFrame columns: {list(df.columns)}")
+        print(f"DEBUG: First DataFrame row:\n{df.head(1)}")
     conn.close()
 
     if not df.empty:
