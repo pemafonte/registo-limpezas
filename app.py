@@ -3151,7 +3151,9 @@ def solicitar_autorizacao(viatura_id):
 
     destinatario_id = None
     if regiao:
-        cur.execute("SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1 AND regiao=?", (regiao,))
+        sql = "SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1 AND regiao=?"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql, (regiao,))
         gestor = cur.fetchone()
         if gestor:
             destinatario_id = gestor["id"]
@@ -3318,7 +3320,9 @@ def novo_registo():
 
     # inserir registo
     # Obter a região atual da viatura
-    cur.execute("SELECT regiao FROM viaturas WHERE id=?", (viatura_id,))
+    sql = "SELECT regiao FROM viaturas WHERE id=?"
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (viatura_id,))
     row = cur.fetchone()
     regiao_viatura = (row["regiao"] or "") if row else None
 
