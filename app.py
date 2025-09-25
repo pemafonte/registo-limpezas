@@ -3142,7 +3142,9 @@ def solicitar_autorizacao(viatura_id):
     cur = conn.cursor()
 
     # Obter região e número de frota da viatura
-    cur.execute("SELECT regiao, num_frota FROM viaturas WHERE id=?", (viatura_id,))
+    sql = "SELECT regiao, num_frota FROM viaturas WHERE id=?"
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (viatura_id,))
     row = cur.fetchone()
     regiao = (row["regiao"] or "").strip() if row and row["regiao"] else None
     num_frota = row["num_frota"] if row else None
@@ -3192,7 +3194,9 @@ def novo_registo():
     user_role = session.get("role")
     regiao_operador = None
     if user_role in ("operador", "gestor"):
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        sql = "SELECT regiao FROM funcionarios WHERE id=?"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql, (user_id,))
         row = cur.fetchone()
         regiao_operador = (row["regiao"] or "").strip() if row and row["regiao"] else None
 
@@ -4013,7 +4017,9 @@ def contabilidade():
     if user_role == "gestor":
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        sql = "SELECT regiao FROM funcionarios WHERE id=?"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql, (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
         conn.close()
@@ -4101,7 +4107,9 @@ def registos():
     user_role = session.get("role")
     regiao_user = None
     if user_role in ("operador", "gestor"):
-        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        sql = "SELECT regiao FROM funcionarios WHERE id=?"
+        sql = fix_sql_placeholders(conn, sql)
+        cur.execute(sql, (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
 
