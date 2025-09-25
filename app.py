@@ -2029,14 +2029,67 @@ def api_pedidos_pendentes():
     conn.close()
     return {"pedidos": pedidos, "count": len(pedidos)}
 
+@app.route("/api/meus_pedidos_status")
+@login_required
+def api_meus_pedidos_status():
+    """API endpoint para operador verificar status dos seus pedidos"""
+    user_id = session.get("user_id")
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    ph = sql_placeholder(conn)
+    today_condition = sql_today_condition(conn, "pa.data_pedido")
+    
+    # Busca pedidos do usuário de hoje (validados e pendentes)
+    cur.execute(f"""
+        SELECT pa.id, pa.validado, pa.data_validacao, v.matricula, v.num_frota,
+               g.nome as gestor_nome, pa.data_pedido
+        FROM pedidos_autorizacao pa
+        JOIN viaturas v ON v.id = pa.viatura_id
+        LEFT JOIN funcionarios g ON g.id = pa.validado_por
+        WHERE pa.funcionario_id={ph} AND {today_condition}
+        ORDER BY pa.data_pedido DESC
+    """, (user_id,))
+    
+    pedidos = []
+    autorizados_recentes = 0
+    
+    for row in cur.fetchall():
+        pedido = {
+            "id": row["id"],
+            "validado": bool(row["validado"]),
+            "matricula": row["matricula"],
+            "num_frota": row["num_frota"], 
+            "gestor_nome": row["gestor_nome"],
+            "data_pedido": row["data_pedido"].strftime("%H:%M") if row["data_pedido"] else "",
+            "data_validacao": row["data_validacao"].strftime("%H:%M") if row["data_validacao"] else ""
+        }
+        pedidos.append(pedido)
+        
+        # Conta autorizações dos últimos 2 minutos (para notificação)
+        if row["validado"] and row["data_validacao"]:
+            from datetime import datetime, timedelta
+            if datetime.now() - row["data_validacao"] < timedelta(minutes=2):
+                autorizados_recentes += 1
+    
+    conn.close()
+    return {
+        "pedidos": pedidos, 
+        "total": len(pedidos),
+        "autorizados": len([p for p in pedidos if p["validado"]]),
+        "pendentes": len([p for p in pedidos if not p["validado"]]),
+        "autorizados_recentes": autorizados_recentes
+    }
+
 @app.route("/auto-refresh.js")
 def auto_refresh_js():
     """Serve JavaScript para auto-refresh dos pedidos pendentes"""
     js_content = """
-// Auto-refresh para pedidos pendentes no dashboard
+// Auto-refresh para pedidos pendentes no dashboard e status de autorizações
 (function() {
     let refreshInterval;
     let lastCount = 0;
+    let lastAutorizados = 0;
     
     function updatePedidosPendentes() {
         fetch('/api/pedidos_pendentes')
@@ -2088,13 +2141,60 @@ def auto_refresh_js():
             .catch(error => console.log('Erro ao buscar pedidos:', error));
     }
     
-    function showNotification(message) {
+    function updateMeusPedidosStatus() {
+        fetch('/api/meus_pedidos_status')
+            .then(response => response.json())
+            .then(data => {
+                // Atualiza contador no título para operadores
+                const originalTitle = document.title.replace(/^\(\d+\) /, '');
+                if (data.autorizados_recentes > 0) {
+                    document.title = `(${data.autorizados_recentes}) ${originalTitle}`;
+                } else if (data.pendentes > 0) {
+                    document.title = `(${data.pendentes}⏳) ${originalTitle}`;
+                } else {
+                    document.title = originalTitle;
+                }
+                
+                // Atualiza área de status dos pedidos (se existir)
+                const statusContainer = document.getElementById('meus-pedidos-status');
+                if (statusContainer) {
+                    let html = '';
+                    if (data.pedidos.length > 0) {
+                        html += '<div class="card mt-3"><div class="card-header"><h6>Meus Pedidos de Hoje</h6></div><div class="card-body">';
+                        data.pedidos.forEach(p => {
+                            const status = p.validado ? 
+                                `<span class="badge bg-success">✅ Autorizado por ${p.gestor_nome} às ${p.data_validacao}</span>` : 
+                                `<span class="badge bg-warning">⏳ Pendente</span>`;
+                            html += `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                                <span><strong>${p.matricula}</strong> (${p.num_frota}) - ${p.data_pedido}</span>
+                                ${status}
+                            </div>`;
+                        });
+                        html += '</div></div>';
+                    }
+                    statusContainer.innerHTML = html;
+                }
+                
+                // Notifica sobre autorizações recentes
+                if (data.autorizados_recentes > 0 && lastAutorizados !== data.autorizados_recentes && notificationsEnabled()) {
+                    showNotification(`🎉 ${data.autorizados_recentes} pedido(s) autorizado(s)! Já pode efetuar limpeza extra.`, 'success');
+                    lastAutorizados = data.autorizados_recentes;
+                }
+            })
+            .catch(error => console.log('Erro ao buscar status dos pedidos:', error));
+    }
+    
+    function showNotification(message, type = 'info') {
         // Cria notificação visual simples
         const notification = document.createElement('div');
-        notification.className = 'alert alert-info alert-dismissible';
+        const alertClass = type === 'success' ? 'alert-success' : 'alert-info';
+        const icon = type === 'success' ? '🎉' : '🔔';
+        const title = type === 'success' ? 'Pedido Autorizado!' : 'Nova solicitação!';
+        
+        notification.className = `alert ${alertClass} alert-dismissible`;
         notification.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 1050; min-width: 300px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);';
         notification.innerHTML = `
-            <strong>🔔 Nova solicitação!</strong> ${message}
+            <strong>${icon} ${title}</strong> ${message}
             <button type="button" class="btn-close" data-bs-dismiss="alert" onclick="this.parentElement.remove()"></button>
         `;
         document.body.appendChild(notification);
@@ -2131,10 +2231,25 @@ def auto_refresh_js():
         return localStorage.getItem('notificationsEnabled') !== 'false';
     }
     
+    // Detecta tipo de usuário através de elementos na página
+    function detectUserType() {
+        // Se existe container de pedidos pendentes, é gestor/admin
+        if (document.getElementById('pedidos-pendentes-container')) {
+            return 'gestor';
+        }
+        // Se existe botão de novo registo, é operador
+        if (document.querySelector('a[href*="novo"]') || document.querySelector('a[href*="registo"]')) {
+            return 'operador';
+        }
+        return 'unknown';
+    }
+    
     // Inicia o auto-refresh quando a página carrega
     document.addEventListener('DOMContentLoaded', function() {
-        // Verifica se estamos na página do dashboard
+        // Verifica se estamos na página principal
         if (window.location.pathname === '/' || window.location.pathname === '/home') {
+            const userType = detectUserType();
+            
             // Adiciona botão para controlar notificações
             const nav = document.querySelector('.navbar-nav');
             if (nav && !document.getElementById('toggle-notifications-btn')) {
@@ -2145,8 +2260,24 @@ def auto_refresh_js():
                 nav.appendChild(li);
             }
             
-            updatePedidosPendentes(); // Primeira verificação
-            refreshInterval = setInterval(updatePedidosPendentes, 30000); // A cada 30 segundos
+            // Adiciona container para status dos pedidos do operador se não existir
+            if (userType === 'operador') {
+                const main = document.querySelector('main') || document.querySelector('.container');
+                if (main && !document.getElementById('meus-pedidos-status')) {
+                    const statusDiv = document.createElement('div');
+                    statusDiv.id = 'meus-pedidos-status';
+                    main.insertBefore(statusDiv, main.firstChild);
+                }
+            }
+            
+            // Inicia verificações baseado no tipo de usuário
+            if (userType === 'gestor') {
+                updatePedidosPendentes(); // Primeira verificação
+                refreshInterval = setInterval(updatePedidosPendentes, 30000); // A cada 30 segundos
+            } else if (userType === 'operador') {
+                updateMeusPedidosStatus(); // Primeira verificação
+                refreshInterval = setInterval(updateMeusPedidosStatus, 20000); // A cada 20 segundos (mais rápido para operadores)
+            }
         }
     });
     
@@ -2169,14 +2300,31 @@ def validar_pedido_autorizacao(pedido_id):
     conn = get_conn()
     cur = conn.cursor()
     ph = sql_placeholder(conn)
+    
+    # Busca dados do pedido antes de autorizar (para log/notificação)
+    cur.execute(f"""
+        SELECT pa.funcionario_id, v.matricula, v.num_frota, f.nome as operador_nome
+        FROM pedidos_autorizacao pa
+        JOIN viaturas v ON v.id = pa.viatura_id  
+        JOIN funcionarios f ON f.id = pa.funcionario_id
+        WHERE pa.id={ph}
+    """, (pedido_id,))
+    pedido_info = cur.fetchone()
+    
     # Compatível com SQLite e PostgreSQL para timestamp
     if is_postgres(conn):
         cur.execute(f"UPDATE pedidos_autorizacao SET validado=1, validado_por={ph}, data_validacao=NOW() WHERE id={ph}", (session["user_id"], pedido_id))
     else:
         cur.execute(f"UPDATE pedidos_autorizacao SET validado=1, validado_por={ph}, data_validacao=CURRENT_TIMESTAMP WHERE id={ph}", (session["user_id"], pedido_id))
+    
     conn.commit()
     conn.close()
-    flash("Pedido autorizado!", "success")
+    
+    if pedido_info:
+        flash(f"Pedido autorizado para {pedido_info['operador_nome']} - {pedido_info['matricula']} ({pedido_info['num_frota']})!", "success")
+    else:
+        flash("Pedido autorizado!", "success")
+        
     return redirect(url_for("pedidos_autorizacao"))
 
 # -----------------------------------------------------------------------------
