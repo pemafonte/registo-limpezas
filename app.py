@@ -3341,12 +3341,14 @@ def novo_registo():
     row = cur.fetchone()
     regiao_viatura = (row["regiao"] or "") if row else None
 
-    cur.execute("""
+    sql = """
         INSERT INTO registos_limpeza
         (viatura_id, protocolo_id, funcionario_id, data_hora, estado, observacoes,
         local, hora_inicio, hora_fim, extra_autorizada, responsavel_autorizacao, regiao)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    """
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (
         viatura_id, protocolo_id, funcionario_id,
         datetime.now().isoformat(timespec="seconds"),
         estado, observacoes, (local or None),
@@ -3454,7 +3456,9 @@ def finalizar_registo(registo_id):
 def validar_limpeza(viatura_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE viaturas SET limpeza_validada=1 WHERE id=?", (viatura_id,))
+    sql = "UPDATE viaturas SET limpeza_validada=1 WHERE id=?"
+    sql = fix_sql_placeholders(conn, sql)
+    cur.execute(sql, (viatura_id,))
     conn.commit()
     conn.close()
     flash("Limpeza extra autorizada! Operador notificado.", "success")
