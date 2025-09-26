@@ -3009,7 +3009,7 @@ def protocolo_novo():
         conn = get_conn()
         cur = conn.cursor()
         try:
-            cur.execute(fix_sql_placeholders(
+            cur.execute(fix_sql_placeholders(conn,
                 "INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo, custo_limpeza) VALUES (?,?,?,?,?)"
             ), (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza))
             conn.commit()
