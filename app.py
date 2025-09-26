@@ -4025,6 +4025,9 @@ def admin_import_viaturas():
             flash("Ficheiro deve ser .csv ou .xlsx", "danger")
             return redirect(url_for("admin_import_viaturas"))
 
+        print(f"DEBUG: Fieldnames encontrados: {fieldnames}")
+        print(f"DEBUG: Primeira linha de dados: {rows[0] if rows else 'Nenhuma linha'}")
+
         required = {"matricula"}
         if not fieldnames or not required.issubset(set(fieldnames)):
             flash("Ficheiro precisa, no mínimo, da coluna 'matricula'.", "danger")
@@ -4032,18 +4035,37 @@ def admin_import_viaturas():
 
         conn = get_conn(); cur = conn.cursor()
         ins, upd = 0, 0
-        for row in rows:
-            matricula = _str(row.get("matricula") or row.get("MATRICULA"))
+        for i, row in enumerate(rows):
+            # Função helper para buscar valor por múltiplas variações de nome
+            def get_value(possible_names):
+                for name in possible_names:
+                    if name in row and row[name] is not None:
+                        val = _str(row[name])
+                        if val:  # Se não for string vazia
+                            return val
+                return None
+            
+            matricula = get_value(["matricula", "MATRICULA", "mat", "MAT", "Matricula", "Matrícula", "MATRÍCULA"])
             if not matricula: continue
-            num_frota = _str(row.get("num_frota") or row.get("NUM_FROTA"))
-            regiao = _str(row.get("regiao") or row.get("REGIAO"))
-            operacao = _str(row.get("operacao") or row.get("OPERACAO"))
-            marca = _str(row.get("marca") or row.get("MARCA"))
-            modelo = _str(row.get("modelo") or row.get("MODELO"))
-            tipo_protocolo = _str(row.get("tipo_protocolo") or row.get("TIPO_PROTOCOLO"))
-            descricao = _str(row.get("descricao") or row.get("DESCRICAO"))
-            filial = _str(row.get("filial") or row.get("FILIAL"))
-            ativo = row.get("ativo") or row.get("ATIVO")
+            
+            num_frota = get_value(["num_frota", "NUM_FROTA", "Num_Frota", "n_frota", "N_FROTA", "numero_frota", "NUMERO_FROTA", "Número da Frota", "Numero da Frota"])
+            regiao = get_value(["regiao", "REGIAO", "Região", "REGIÃO", "Regiao", "region", "REGION"])
+            operacao = get_value(["operacao", "OPERACAO", "Operação", "OPERAÇÃO", "Operacao", "operation", "OPERATION"])  
+            marca = get_value(["marca", "MARCA", "Marca", "brand", "BRAND"])
+            modelo = get_value(["modelo", "MODELO", "Modelo", "model", "MODEL"])
+            
+            if i == 0:  # Debug primeira linha
+                print(f"DEBUG: Primeira viatura processada:")
+                print(f"  matricula: '{matricula}'")
+                print(f"  num_frota: '{num_frota}'")
+                print(f"  regiao: '{regiao}'")
+                print(f"  operacao: '{operacao}'")
+                print(f"  marca: '{marca}'")
+                print(f"  modelo: '{modelo}'")
+            tipo_protocolo = get_value(["tipo_protocolo", "TIPO_PROTOCOLO", "Tipo_Protocolo", "Tipo de Protocolo", "TIPO DE PROTOCOLO", "protocolo", "PROTOCOLO"])
+            descricao = get_value(["descricao", "DESCRICAO", "Descrição", "DESCRIÇÃO", "Descricao", "description", "DESCRIPTION"])
+            filial = get_value(["filial", "FILIAL", "Filial", "branch", "BRANCH"])
+            ativo = row.get("ativo") or row.get("ATIVO") or row.get("Ativo") or row.get("ACTIVO") or row.get("activo")
             ativo = 1 if str(ativo).strip().lower() in {"1","true","sim","yes","y"} else 1  # default 1
 
             cur.execute(fix_sql_placeholders(conn, "SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
