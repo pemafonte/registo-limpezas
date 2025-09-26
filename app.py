@@ -4038,19 +4038,29 @@ def admin_import_viaturas():
         for i, row in enumerate(rows):
             # Função helper para buscar valor por múltiplas variações de nome
             def get_value(possible_names):
+                # Primeiro tenta nomes exactos
                 for name in possible_names:
                     if name in row and row[name] is not None:
                         val = _str(row[name])
                         if val:  # Se não for string vazia
                             return val
+                
+                # Depois tenta nomes com espaços removidos (caso hajam espaços extra)
+                for name in possible_names:
+                    for key in row.keys():
+                        if key.strip().lower() == name.strip().lower():
+                            if row[key] is not None:
+                                val = _str(row[key])
+                                if val:
+                                    return val
                 return None
             
             matricula = get_value(["matricula", "MATRICULA", "mat", "MAT", "Matricula", "Matrícula", "MATRÍCULA"])
             if not matricula: continue
             
-            num_frota = get_value(["num_frota", "NUM_FROTA", "Num_Frota", "n_frota", "N_FROTA", "numero_frota", "NUMERO_FROTA", "Número da Frota", "Numero da Frota"])
-            regiao = get_value(["regiao", "REGIAO", "Região", "REGIÃO", "Regiao", "region", "REGION"])
-            operacao = get_value(["operacao", "OPERACAO", "Operação", "OPERAÇÃO", "Operacao", "operation", "OPERATION"])  
+            num_frota = get_value(["num_frota", "NUM_FROTA", "Num_Frota", "n_frota", "N_FROTA", "numero_frota", "NUMERO_FROTA", "Número da Frota", "Numero da Frota", "nº de frota", "Nº de Frota", "No de Frota"])
+            regiao = get_value(["regiao", "REGIAO", "Região", "REGIÃO", "Regiao", "region", "REGION", "região"])
+            operacao = get_value(["operacao", "OPERACAO", "Operação", "OPERAÇÃO", "Operacao", "operation", "OPERATION", "operação"])  
             marca = get_value(["marca", "MARCA", "Marca", "brand", "BRAND"])
             modelo = get_value(["modelo", "MODELO", "Modelo", "model", "MODEL"])
             
@@ -4071,9 +4081,9 @@ def admin_import_viaturas():
             cur.execute(fix_sql_placeholders(conn, "SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
             ex = cur.fetchone()
             if ex:
-                cur.execute("""UPDATE viaturas
+                cur.execute(fix_sql_placeholders(conn, """UPDATE viaturas
                                SET num_frota=?, regiao=?, operacao=?, marca=?, modelo=?, tipo_protocolo=?, descricao=?, filial=?, ativo=?
-                               WHERE id=?""",
+                               WHERE id=?"""),
                             (num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, ex["id"]))
                 upd += 1
             else:
