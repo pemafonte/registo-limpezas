@@ -4627,6 +4627,9 @@ def export_registos_excel():
 # Arrancar
 # -----------------------------------------------------------------------------
 
+# Flag para evitar múltiplas inicializações
+_schema_initialized = False
+
 # Try to initialize schema early (but don't fail if it doesn't work)
 def initialize_schema_early():
     global _schema_initialized
@@ -4651,11 +4654,6 @@ else:
     except Exception as e:
         print(f"DEBUG: Inicialização precoce sob gunicorn falhou: {e}")
 # ---- Extensões de esquema (idempotentes) ----
-
-
-
-# Flag para evitar múltiplas inicializações
-_schema_initialized = False
 
 # Health check endpoint para Render (não requer autenticação)
 @app.route('/health')
