@@ -1,44 +1,22 @@
-# AppFlaskLimpeza.py
-
 from __future__ import annotations
 import os, json, io, csv
+import re
 from pathlib import Path
-from datetime import datetime, date
-import sys
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
-print("DEBUG: Iniciando importações...")
+from flask import (
+    Flask, request, render_template, redirect, url_for, session, send_from_directory, send_file, flash, Response, abort
+)
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
-try:
-    from flask import (
-        Flask, request, render_template, redirect, url_for, session, send_from_directory, send_file, flash, Response, abort
-    )
-    print("DEBUG: Flask importado com sucesso")
-except Exception as e:
-    print(f"ERRO CRÍTICO: Falha ao importar Flask: {e}")
-    sys.exit(1)
-
-try:
-    from werkzeug.security import check_password_hash, generate_password_hash
-    from werkzeug.utils import secure_filename
-    print("DEBUG: Werkzeug importado com sucesso")
-except Exception as e:
-    print(f"ERRO CRÍTICO: Falha ao importar Werkzeug: {e}")
-    sys.exit(1)
-
-try:
-    import sqlite3
-    print("DEBUG: SQLite3 importado com sucesso")
-except Exception as e:
-    print(f"ERRO CRÍTICO: Falha ao importar SQLite3: {e}")
-    sys.exit(1)
-
+import sqlite3
 try:
     import psycopg2
     import psycopg2.extras
-    print("DEBUG: psycopg2 importado com sucesso")
 except ImportError:
     psycopg2 = None
-    print("DEBUG: psycopg2 não disponível - usando SQLite")
 
 # -----------------------------------------------------------------------------
 # Configuração
@@ -54,22 +32,126 @@ APP_SIGNATURE = "Created by Pedro Fonte"
 
 ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".pdf"}
 
-print("DEBUG: Criando aplicação Flask...")
-app = Flask(__name__)
-print("DEBUG: Flask app criado com sucesso")
+TZ_PT = ZoneInfo("Europe/Lisbon")
 
+
+def now_pt() -> datetime:
+    """Data/hora atual em Portugal continental (WET/WEST automático)."""
+    return datetime.now(TZ_PT)
+
+
+def today_pt() -> date:
+    return now_pt().date()
+
+
+def now_pt_iso() -> str:
+    """ISO sem timezone para gravar na BD (hora civil de Portugal)."""
+    return now_pt().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def today_pt_iso() -> str:
+    return today_pt().isoformat()
+
+
+def parse_descricao_viaturas(value: str | None) -> list[str]:
+    """
+    Aceita uma lista separada por vírgulas ou ponto-e-vírgula.
+    Ex.: "Autocarro Urbano;Autocarro Suburbano"
+    """
+    parts = re.split(r"[;,]", value or "")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def sql_date_eq_today(col: str, conn) -> tuple[str, str]:
+    ph = sql_placeholder(conn)
+    return f"date({col}) = {ph}", today_pt_iso()
+
+
+def _gestor_ultimos_registos_verificacao(cur, ph, regiao_gestor: str | None, *, apenas_pendentes: bool):
+    """Último registo concluído por viatura+protocolo, filtrado por região e estado de verificação."""
+    where = ["r.estado='concluido'"]
+    params: list[str] = []
+    if regiao_gestor:
+        where.append(f"v.regiao = {ph}")
+        params.append(regiao_gestor)
+    if apenas_pendentes:
+        where.append("(r.verificacao_limpeza IS NULL OR TRIM(r.verificacao_limpeza)='')")
+    else:
+        where.append("(r.verificacao_limpeza IS NOT NULL AND TRIM(r.verificacao_limpeza)<>'')")
+
+    subquery = f"""
+        SELECT r.viatura_id, r.protocolo_id, MAX(r.data_hora) AS ult
+        FROM registos_limpeza r
+        JOIN viaturas v ON v.id = r.viatura_id
+        WHERE {" AND ".join(where)}
+        GROUP BY r.viatura_id, r.protocolo_id
+    """
+    cur.execute(
+        f"""
+        WITH base AS (
+            {subquery}
+        )
+        SELECT
+            r.id AS registo_id,
+            v.matricula,
+            v.num_frota,
+            v.descricao,
+            p.nome AS protocolo_nome,
+            r.data_hora,
+            r.local,
+            r.verificacao_limpeza,
+            r.comentarios_verificacao,
+            r.verificacao_em
+        FROM registos_limpeza r
+        JOIN base b
+          ON b.viatura_id = r.viatura_id
+         AND b.protocolo_id = r.protocolo_id
+         AND b.ult = r.data_hora
+        JOIN viaturas v ON v.id = r.viatura_id
+        JOIN protocolos p ON p.id = r.protocolo_id
+        ORDER BY p.nome, v.matricula
+        """,
+        params,
+    )
+    return [dict(x) for x in cur.fetchall()]
+
+
+def _processar_verificacoes_gestor(cur, ph, selected_ids: list[str]) -> list[str]:
+    erros: list[str] = []
+    for rid_str in selected_ids:
+        try:
+            rid = int(rid_str)
+        except (TypeError, ValueError):
+            continue
+        status = (request.form.get(f"status_{rid_str}") or "").strip()
+        comentario = (request.form.get(f"coment_{rid_str}") or "").strip()
+        if not status:
+            erros.append(f"Registo {rid}: falta o estado da verificação.")
+            continue
+        status_l = status.lower()
+        if status_l in {"não conforme", "nao conforme"} and not comentario:
+            erros.append(f"Registo {rid}: comentário obrigatório para 'não conforme'.")
+            continue
+        comentarios_to_save = comentario if status_l in {"não conforme", "nao conforme"} else None
+        cur.execute(
+            f"""UPDATE registos_limpeza
+                SET verificacao_limpeza={ph},
+                    comentarios_verificacao={ph},
+                    verificacao_em={ph}
+                WHERE id={ph}""",
+            (status, comentarios_to_save, now_pt_iso(), rid),
+        )
+    return erros
+
+
+app = Flask(__name__, template_folder=str(BASE_DIR))
 app.secret_key = os.environ.get("APP_SECRET_KEY", "dev-key-please-change")
-print("DEBUG: Secret key configurada")
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 EXPORT_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
-print("DEBUG: Diretórios criados com sucesso")
 
 print("### DB em uso:", DB_PATH)
-print("DEBUG: Variáveis de ambiente:")
-print(f"  DATABASE_URL: {'[DEFINIDA]' if os.environ.get('DATABASE_URL') else '[NÃO DEFINIDA]'}")
-print(f"  PORT: {os.environ.get('PORT', '5000')}")
 
 
 # -----------------------------------------------------------------------------
@@ -611,30 +693,59 @@ def write_templates():
 # -----------------------------------------------------------------------------
 def get_conn():
     db_url = os.environ.get("DATABASE_URL")
-    try:
-        if db_url and psycopg2:
-            # Heroku/PostgreSQL with timeout settings
-            print(f"DEBUG: Conectando ao PostgreSQL: {db_url[:50]}...")
-            conn = psycopg2.connect(
-                db_url, 
-                cursor_factory=psycopg2.extras.RealDictCursor,
-                connect_timeout=10,  # 10 second timeout
-                options='-c statement_timeout=30000'  # 30 second statement timeout
-            )
-            print("DEBUG: Conexão PostgreSQL estabelecida com sucesso")
-            return conn
+    if db_url and psycopg2:
+        # Heroku/PostgreSQL
+        conn = psycopg2.connect(db_url, cursor_factory=CompatRealDictCursor)
+        return conn
+    else:
+        # Local/SQLite
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def qmark_to_postgres(sql: str) -> str:
+    """
+    Converte placeholders SQLite (?) para PostgreSQL (%s),
+    ignorando interrogações dentro de strings SQL.
+    """
+    out = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'" and not in_double:
+            # Trata escaped quote em SQL: ''
+            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
+                out.append("''")
+                i += 2
+                continue
+            in_single = not in_single
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "?" and not in_single and not in_double:
+            out.append("%s")
         else:
-            # Local/SQLite
-            print(f"DEBUG: Conectando ao SQLite: {DB_PATH}")
-            conn = sqlite3.connect(DB_PATH, timeout=10.0)
-            conn.row_factory = sqlite3.Row
-            print("DEBUG: Conexão SQLite estabelecida com sucesso")
-            return conn
-    except Exception as e:
-        print(f"ERRO CRÍTICO na conexão com banco: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+class CompatRealDictCursor(psycopg2.extras.RealDictCursor if psycopg2 else object):
+    def execute(self, query, vars=None):
+        if isinstance(query, str) and "?" in query:
+            query = qmark_to_postgres(query)
+        return super().execute(query, vars)
+
+    def executemany(self, query, vars_list):
+        if isinstance(query, str) and "?" in query:
+            query = qmark_to_postgres(query)
+        return super().executemany(query, vars_list)
 
 def is_postgres(conn):
     return hasattr(conn, "server_version")  # True para psycopg2, False para sqlite3
@@ -642,47 +753,32 @@ def is_postgres(conn):
 def sql_placeholder(conn):
     return "%s" if is_postgres(conn) else "?"
 
-def sql_datetime(conn, field):
-    """Helper para função datetime() compatível com PostgreSQL e SQLite"""
-    if is_postgres(conn):
-        return f"({field})::timestamp::text"  # PostgreSQL: cast to timestamp then to text
-    else:
-        return f"datetime({field})"  # SQLite: função datetime()
+def first_col(row, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        for v in row.values():
+            return v
+        return default
+    try:
+        return row[0]
+    except Exception:
+        return default
 
-def fix_datetime_in_sql(conn, sql):
-    """Substitui datetime() por sintaxe compatível baseada no tipo de banco"""
+def table_columns(conn, table_name: str) -> set[str]:
+    cur = conn.cursor()
     if is_postgres(conn):
-        import re
-        # Substitui datetime(campo) por (campo)::timestamp
-        return re.sub(r'datetime\(([^)]+)\)', r'(\1)::timestamp', sql)
-    return sql
-
-def sql_today_condition(conn, date_field):
-    """Retorna condição SQL para comparar um campo de data com hoje"""
-    if is_postgres(conn):
-        return f"({date_field})::date = CURRENT_DATE"
-    else:
-        return f"date({date_field}) = date('now','localtime')"
-
-def sql_month_format(conn, date_field):
-    """Retorna função SQL para formatar data como YYYY-MM"""
-    if is_postgres(conn):
-        return f"TO_CHAR({date_field}, 'YYYY-MM')"
-    else:
-        return f"strftime('%Y-%m', {date_field})"
-
-def sql_date(conn, date_field):
-    """Retorna função SQL para extrair data de um timestamp"""
-    if is_postgres(conn):
-        return f"({date_field})::date"
-    else:
-        return f"date({date_field})"
-
-def fix_sql_placeholders(conn, sql):
-    """Converte placeholders ? para %s se for PostgreSQL"""
-    if is_postgres(conn):
-        return sql.replace('?', '%s')
-    return sql
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        )
+        return {r["column_name"] for r in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table_name})")
+    return {r["name"] for r in cur.fetchall()}
 
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
@@ -775,136 +871,63 @@ def inject_can():
 def ensure_custo_limpeza_in_protocolos():
     conn = get_conn()
     cur = conn.cursor()
-    
+    # PRAGMA só existe em SQLite, ignora em PostgreSQL
     try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'protocolos'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(protocolos)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
+        cur.execute("PRAGMA table_info(protocolos)")
+        cols = {r["name"] for r in cur.fetchall()}
         if "custo_limpeza" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_custo_limpeza")
-                cur.execute("ALTER TABLE protocolos ADD COLUMN custo_limpeza REAL DEFAULT 25")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_custo_limpeza")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_custo_limpeza")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
+            cur.execute("ALTER TABLE protocolos ADD COLUMN custo_limpeza REAL DEFAULT 25")
+            conn.commit()
     except Exception:
         pass
-    finally:
-        conn.close()
+    conn.close()
 
-try:
-    ensure_custo_limpeza_in_protocolos()
-except Exception as e:
-    print(f"ERRO em ensure_custo_limpeza_in_protocolos: {e}")
+ensure_custo_limpeza_in_protocolos()
 
 def ensure_regiao_in_registos_limpeza():
     conn = get_conn()
     cur = conn.cursor()
-    
     try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(registos_limpeza)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
+        cur.execute("PRAGMA table_info(registos_limpeza)")
+        cols = {r["name"] for r in cur.fetchall()}
         if "regiao" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_regiao")
-                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN regiao TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_regiao")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_regiao")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
+            cur.execute("ALTER TABLE registos_limpeza ADD COLUMN regiao TEXT")
+            conn.commit()
     except Exception:
         pass
-    finally:
-        conn.close()
+    conn.close()
 
-try:
-    ensure_regiao_in_registos_limpeza()
-except Exception as e:
-    print(f"ERRO em ensure_regiao_in_registos_limpeza: {e}")
+ensure_regiao_in_registos_limpeza()
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
 # Esquema / seed
 # -----------------------------------------------------------------------------
 def ensure_schema_on_boot():
-    print("DEBUG: Iniciando ensure_schema_on_boot()")
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        print("DEBUG: Conexão estabelecida para schema")
-        
-        # Definir sintaxe correta baseado no tipo de banco
-        if is_postgres(conn):
-            id_field = "id SERIAL PRIMARY KEY"
-            text_type = "TEXT"
-            timestamp_default = "CURRENT_TIMESTAMP"
-            print("DEBUG: Usando sintaxe PostgreSQL")
-        else:
-            id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
-            text_type = "TEXT"  
-            timestamp_default = "CURRENT_TIMESTAMP"
-            print("DEBUG: Usando sintaxe SQLite")
-    except Exception as e:
-        print(f"ERRO CRÍTICO em ensure_schema_on_boot() - conexão: {e}")
-        import traceback
-        traceback.print_exc()
-        return
+    conn = get_conn()
+    cur = conn.cursor()
+    ph = sql_placeholder(conn)
+    id_col = (
+        "INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"
+        if is_postgres(conn)
+        else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    )
     
     # Tabelas principais
-    try:
-        print("DEBUG: Criando tabela viaturas...")
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS viaturas (
-                {id_field},
-                matricula TEXT NOT NULL UNIQUE,
-                descricao TEXT,
-                filial TEXT,
-                num_frota TEXT,
-                ativo INTEGER DEFAULT 1,
-                criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        print("DEBUG: Tabela viaturas criada com sucesso")
-    except Exception as e:
-        print(f"ERRO ao criar tabela viaturas: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    try:
-        print("DEBUG: Criando tabela protocolos...")
-        cur.execute(f"""
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS viaturas (
+            id {id_col},
+            matricula TEXT NOT NULL UNIQUE,
+            descricao TEXT,
+            filial TEXT,
+            num_frota TEXT,
+            ativo INTEGER DEFAULT 1,
+            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS protocolos (
-            {id_field},
+            id {id_col},
             nome TEXT NOT NULL UNIQUE,
             passos_json TEXT NOT NULL,
             frequencia_dias INTEGER,
@@ -912,36 +935,9 @@ def ensure_schema_on_boot():
             criado_em TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-        print("DEBUG: Tabela protocolos criada com sucesso")
-    except Exception as e:
-        print(f"ERRO ao criar tabela protocolos: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Criar funcionarios ANTES de registos_limpeza (para foreign key)
-    try:
-        print("DEBUG: Criando tabela funcionarios...")
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS funcionarios (
-                {id_field},
-                username TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL,
-                nome TEXT,
-                role TEXT DEFAULT 'leitura',
-                email TEXT,
-                ativo INTEGER DEFAULT 1,
-                regiao TEXT,
-                criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        print("DEBUG: Tabela funcionarios criada com sucesso")
-    except Exception as e:
-        print(f"ERRO ao criar tabela funcionarios: {e}")
-        import traceback
-        traceback.print_exc()
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS registos_limpeza (
-            {id_field},
+            id {id_col},
             viatura_id INTEGER NOT NULL,
             protocolo_id INTEGER NOT NULL,
             funcionario_id INTEGER NOT NULL,
@@ -962,7 +958,7 @@ def ensure_schema_on_boot():
     """)
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS anexos (
-            {id_field},
+            id {id_col},
             registo_id INTEGER NOT NULL,
             caminho TEXT NOT NULL,
             tipo TEXT,
@@ -972,8 +968,22 @@ def ensure_schema_on_boot():
     """)
     # ...existing code...
     cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS funcionarios (
+            id {id_col},
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            nome TEXT,
+            role TEXT DEFAULT 'leitura',
+            email TEXT,
+            ativo INTEGER DEFAULT 1,
+            regiao TEXT,
+            descricao_viaturas TEXT,
+            criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+    cur.execute(f"""
     CREATE TABLE IF NOT EXISTS pedidos_autorizacao (
-        {id_field},
+        id {id_col},
         viatura_id INTEGER NOT NULL,
         funcionario_id INTEGER NOT NULL,
         data_pedido TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -988,7 +998,7 @@ def ensure_schema_on_boot():
 # ...existing code...
     # Perfis dinâmicos
     cur.execute(f"""CREATE TABLE IF NOT EXISTS roles (
-        {id_field},
+        id {id_col},
         name TEXT NOT NULL UNIQUE
     )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS role_permissions (
@@ -1038,20 +1048,16 @@ def ensure_schema_on_boot():
     """)
 
     # Seeds
-    cur.execute("SELECT COUNT(*) as count FROM funcionarios WHERE username='admin'")
-    result = cur.fetchone()
-    count = result['count'] if isinstance(result, dict) else result[0]
-    if count == 0:
-        placeholder = sql_placeholder(conn)
+    cur.execute("SELECT COUNT(*) FROM funcionarios WHERE username='admin'")
+    if first_col(cur.fetchone(), 0) == 0:
         cur.execute(
-            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
+            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({ph},{ph},{ph},{ph},1)",
             ("admin", generate_password_hash("1234"), "Administrador", "admin")
         )
     cur.execute("SELECT 1 FROM funcionarios WHERE username='Pedro.fonte'")
     if not cur.fetchone():
-        placeholder = sql_placeholder(conn)
         cur.execute(
-            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
+            f"INSERT INTO funcionarios (username,password,nome,role,ativo) VALUES ({ph},{ph},{ph},{ph},1)",
             ("Pedro.fonte", generate_password_hash("1234"), "Pedro Fonte", "admin")
         )
     cur.execute("""
@@ -1060,107 +1066,45 @@ def ensure_schema_on_boot():
          WHERE role IS NULL OR TRIM(LOWER(role)) NOT IN ('admin','gestor','operador','leitura')
     """)
 
-    cur.execute("SELECT COUNT(*) as count FROM viaturas")
-    result = cur.fetchone()
-    count = result['count'] if isinstance(result, dict) else result[0]
-    if count == 0:
-        placeholder = sql_placeholder(conn)
-        for viatura in [
-            ("AA-00-AA", "Autocarro Urbano", "Sede", "101"),
-            ("BB-11-BB", "Autocarro Suburbano", "Filial Norte", "102"),
-        ]:
-            cur.execute(
-                f"INSERT INTO viaturas (matricula, descricao, filial, num_frota, ativo) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},1)",
-                viatura
-            )
+    cur.execute("SELECT COUNT(*) FROM viaturas")
+    if first_col(cur.fetchone(), 0) == 0:
+        cur.executemany(
+            f"INSERT INTO viaturas (matricula, descricao, filial, num_frota, ativo) VALUES ({ph},{ph},{ph},{ph},1)",
+            [
+                ("AA-00-AA", "Autocarro Urbano", "Sede", "101"),
+                ("BB-11-BB", "Autocarro Suburbano", "Filial Norte", "102"),
+            ]
+        )
     
     # Garantir coluna regiao em funcionarios
     try:
-        if is_postgres(conn):
-            # PostgreSQL: verificar colunas via information_schema
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            # SQLite: usar PRAGMA
-            cur.execute("PRAGMA table_info(funcionarios)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
+        cols = table_columns(conn, "funcionarios")
         if "email" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_email_col")
-                cur.execute("ALTER TABLE funcionarios ADD COLUMN email TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_email_col")
-            except Exception:
-                if is_postgres(conn):
-                    cur.execute("ROLLBACK TO SAVEPOINT add_email_col")
-                pass
+            cur.execute("ALTER TABLE funcionarios ADD COLUMN email TEXT")
     except Exception:
+        pass
         cols = set()
     if "regiao" not in cols:
-        try: 
-            if is_postgres(conn):
-                cur.execute("SAVEPOINT add_regiao_col")
-            cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
-            if is_postgres(conn):
-                cur.execute("RELEASE SAVEPOINT add_regiao_col")
-        except Exception: 
-            if is_postgres(conn):
-                try:
-                    cur.execute("ROLLBACK TO SAVEPOINT add_regiao_col")
-                except:
-                    pass
-            pass
+        try: cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
+        except Exception: pass
+
+    if "descricao_viaturas" not in cols:
+        try: cur.execute("ALTER TABLE funcionarios ADD COLUMN descricao_viaturas TEXT")
+        except Exception: pass
 
     # Garantir colunas extra em viaturas
     try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'viaturas'")
-            vcols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(viaturas)")
-            vcols = {r["name"] for r in cur.fetchall()}
+        vcols = table_columns(conn, "viaturas")
         if "limpeza_validada" not in vcols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_limpeza_validada")
-                cur.execute("ALTER TABLE viaturas ADD COLUMN limpeza_validada INTEGER DEFAULT 0")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_limpeza_validada")
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_limpeza_validada")
-                    except:
-                        pass
+            cur.execute("ALTER TABLE viaturas ADD COLUMN limpeza_validada INTEGER DEFAULT 0")
         for col in ("regiao","operacao","marca","modelo","tipo_protocolo"):
             if col not in vcols:
                 try:
-                    if is_postgres(conn):
-                        cur.execute(f"SAVEPOINT add_{col}_col")
                     cur.execute(f"ALTER TABLE viaturas ADD COLUMN {col} TEXT")
-                    if is_postgres(conn):
-                        cur.execute(f"RELEASE SAVEPOINT add_{col}_col")
                 except Exception:
-                    if is_postgres(conn):
-                        try:
-                            cur.execute(f"ROLLBACK TO SAVEPOINT add_{col}_col")
-                        except:
-                            pass
+                    pass
         if "verificacao_limpeza" not in vcols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_verificacao_col")
-                cur.execute("ALTER TABLE viaturas ADD COLUMN verificacao_limpeza TEXT DEFAULT NULL")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_verificacao_col")
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_verificacao_col")
-                    except:
-                        pass  
+            cur.execute("ALTER TABLE viaturas ADD COLUMN verificacao_limpeza TEXT DEFAULT NULL")  
 
     except Exception:
         pass
@@ -1169,7 +1113,7 @@ def ensure_schema_on_boot():
 
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS alertas (
-        {id_field},
+        id {id_col},
         viatura_id INTEGER NOT NULL,
         funcionario_origem_id INTEGER,
         destinatario_id INTEGER,
@@ -1185,275 +1129,108 @@ def ensure_schema_on_boot():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alertas_dest ON alertas(destinatario_id, lido)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_alertas_viat ON alertas(viatura_id, data_hora)")
     
-    # Verificação adicional de coluna regiao (caso não tenha sido criada antes)
     try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(funcionarios)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "regiao" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_regiao_backup")
-                cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_regiao_backup")
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_regiao_backup")
-                    except:
-                        pass
+        cols = table_columns(conn, "funcionarios")
     except Exception:
-        pass    
+        cols = set()
+    if "regiao" not in cols:
+        try:
+            cur.execute("ALTER TABLE funcionarios ADD COLUMN regiao TEXT")
+        except Exception:
+            pass    
 
-    cur.execute("SELECT COUNT(*) as count FROM protocolos")
-    result = cur.fetchone()
-    count = result['count'] if isinstance(result, dict) else result[0]
-    if count == 0:
-        placeholder = sql_placeholder(conn)
+    if "descricao_viaturas" not in cols:
+        try:
+            cur.execute("ALTER TABLE funcionarios ADD COLUMN descricao_viaturas TEXT")
+        except Exception:
+            pass
+
+    cur.execute("SELECT COUNT(*) FROM protocolos")
+    if first_col(cur.fetchone(), 0) == 0:
         prot1 = {"passos": ["Inspeção interior", "Aspirar", "Desinfetar superfícies", "Vidros interiores", "Check final"]}
         prot2 = {"passos": ["Inspeção exterior", "Lavagem chassis", "Vidros exteriores", "Verificar níveis", "Check final"]}
-        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({placeholder},{placeholder},{placeholder},1)",
+        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({ph},{ph},{ph},1)",
                     ("Interior Standard", json.dumps(prot1, ensure_ascii=False), 7))
-        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({placeholder},{placeholder},{placeholder},1)",
+        cur.execute(f"INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo) VALUES ({ph},{ph},{ph},1)",
                     ("Exterior Standard", json.dumps(prot2, ensure_ascii=False), 14))
     else:
         cur.execute("UPDATE protocolos SET frequencia_dias=7  WHERE frequencia_dias IS NULL AND nome LIKE 'Interior%'")
         cur.execute("UPDATE protocolos SET frequencia_dias=14 WHERE frequencia_dias IS NULL AND nome LIKE 'Exterior%'")
 
-    print("DEBUG: Fazendo commit das tabelas criadas...")
     conn.commit()
     conn.close()
-    print("DEBUG: ensure_schema_on_boot() finalizada - tabelas commitadas")
 
-print("DEBUG: Chamando ensure_schema_on_boot()...")
-try:
-    ensure_schema_on_boot()
-    print("DEBUG: ensure_schema_on_boot() concluída com sucesso")
-except Exception as e:
-    print(f"ERRO CRÍTICO na inicialização do schema: {e}")
-    import traceback
-    traceback.print_exc()
-    print("ATENÇÃO: Schema não foi inicializado - aplicação pode falhar")
+ensure_schema_on_boot()
 
 # -----------------------------------------------------------------------------
 def ensure_destinatario_id():
     conn = get_conn()
     cur = conn.cursor()
-    
-    try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pedidos_autorizacao'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(pedidos_autorizacao)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "destinatario_id" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_destinatario_id")
-                cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN destinatario_id INTEGER")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_destinatario_id")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_destinatario_id")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    cols = table_columns(conn, "pedidos_autorizacao")
+    if "destinatario_id" not in cols:
+        cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN destinatario_id INTEGER")
+        conn.commit()
+    conn.close()
 
-try:
-    ensure_destinatario_id()
-except Exception as e:
-    print(f"ERRO em ensure_destinatario_id: {e}")
+ensure_destinatario_id()
 
 def add_verificacao_limpeza_column():
     conn = get_conn()
     cur = conn.cursor()
-    
-    try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(registos_limpeza)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "verificacao_limpeza" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_verificacao_limpeza")
-                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN verificacao_limpeza TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_verificacao_limpeza")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_verificacao_limpeza")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    cols = table_columns(conn, "registos_limpeza")
+    if "verificacao_limpeza" not in cols:
+        cur.execute("ALTER TABLE registos_limpeza ADD COLUMN verificacao_limpeza TEXT")
+        conn.commit()
+    conn.close()
 
-try:
-    add_verificacao_limpeza_column()
-except Exception as e:
-    print(f"ERRO em add_verificacao_limpeza_column: {e}")
+add_verificacao_limpeza_column()
 
 def ensure_num_frota_in_pedidos_autorizacao():
     conn = get_conn()
     cur = conn.cursor()
-    
-    try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pedidos_autorizacao'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(pedidos_autorizacao)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "num_frota" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_num_frota")
-                cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN num_frota TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_num_frota")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_num_frota")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    cols = table_columns(conn, "pedidos_autorizacao")
+    if "num_frota" not in cols:
+        cur.execute("ALTER TABLE pedidos_autorizacao ADD COLUMN num_frota TEXT")
+        conn.commit()
+    conn.close()
 
-try:
-    ensure_num_frota_in_pedidos_autorizacao()
-except Exception as e:
-    print(f"ERRO em ensure_num_frota_in_pedidos_autorizacao: {e}")
+ensure_num_frota_in_pedidos_autorizacao()
 def ensure_comentarios_verificacao_in_registos_limpeza():
     conn = get_conn()
     cur = conn.cursor()
-    
-    try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'registos_limpeza'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(registos_limpeza)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "comentarios_verificacao" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_comentarios_verificacao")
-                cur.execute("ALTER TABLE registos_limpeza ADD COLUMN comentarios_verificacao TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_comentarios_verificacao")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_comentarios_verificacao")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    cols = table_columns(conn, "registos_limpeza")
+    if "comentarios_verificacao" not in cols:
+        cur.execute("ALTER TABLE registos_limpeza ADD COLUMN comentarios_verificacao TEXT")
+        conn.commit()
+    conn.close()
 
-try:
-    ensure_comentarios_verificacao_in_registos_limpeza()
-except Exception as e:
-    print(f"ERRO em ensure_comentarios_verificacao_in_registos_limpeza: {e}")
+ensure_comentarios_verificacao_in_registos_limpeza()
+
+def ensure_verificacao_em_in_registos_limpeza():
+    """
+    Guarda a data/hora em que o gestor fez a inspeção (verificação),
+    para conseguirmos calcular dias entre inspeções.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cols = table_columns(conn, "registos_limpeza")
+    if "verificacao_em" not in cols:
+        cur.execute("ALTER TABLE registos_limpeza ADD COLUMN verificacao_em TEXT")
+        conn.commit()
+    conn.close()
+
+ensure_verificacao_em_in_registos_limpeza()
 
 def ensure_empresa_in_funcionarios():
     conn = get_conn()
     cur = conn.cursor()
-    
-    try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'funcionarios'")
-            cols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(funcionarios)")
-            cols = {r["name"] for r in cur.fetchall()}
-            
-        if "empresa" not in cols:
-            try:
-                if is_postgres(conn):
-                    cur.execute("SAVEPOINT add_empresa")
-                cur.execute("ALTER TABLE funcionarios ADD COLUMN empresa TEXT")
-                if is_postgres(conn):
-                    cur.execute("RELEASE SAVEPOINT add_empresa")
-                conn.commit()
-            except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute("ROLLBACK TO SAVEPOINT add_empresa")
-                    except:
-                        pass
-                try:
-                    conn.rollback()
-                except:
-                    pass
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    cols = table_columns(conn, "funcionarios")
+    if "empresa" not in cols:
+        cur.execute("ALTER TABLE funcionarios ADD COLUMN empresa TEXT")
+        conn.commit()
+    conn.close()
 
-try:
-    ensure_empresa_in_funcionarios()
-except Exception as e:
-    print(f"ERRO em ensure_empresa_in_funcionarios: {e}")
-# Rota de teste para debug
-@app.route("/debug")
-def debug_route():
-    try:
-        db_url = os.environ.get("DATABASE_URL")
-        return f"""
-        <h1>Debug Info</h1>
-        <p>DATABASE_URL: {'[DEFINIDA]' if db_url else '[NÃO DEFINIDA]'}</p>
-        <p>psycopg2: {'Disponível' if psycopg2 else 'Não disponível'}</p>
-        <p>Python Version: {sys.version}</p>
-        <p>App funcionando!</p>
-        """
-    except Exception as e:
-        return f"Erro: {e}"
-
+ensure_empresa_in_funcionarios()
 # Autenticação
 # -----------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
@@ -1554,8 +1331,7 @@ def home():
     # Helper para adicionar filtro de região e mês
     def filtro_mes_regiao(sql, params, alias_registos="r", alias_viaturas="v"):
         if mes:
-            month_format = sql_month_format(conn, f"{alias_registos}.data_hora")
-            sql += f" AND {month_format} = {ph}"
+            sql += f" AND substr({alias_registos}.data_hora, 1, 7) = {ph}"
             params.append(mes)
         if regiao_gestor:
             sql += f" AND {alias_viaturas}.regiao = {ph}"
@@ -1570,37 +1346,40 @@ def home():
     viaturas_sql = "SELECT id, matricula, descricao, filial, num_frota, regiao FROM viaturas WHERE ativo=1"
     viaturas_params = []
     regiao_user = None
+    desc_list_user: list[str] = []
     if user_role in ("gestor", "operador"):
-        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (user_id,))
+        cur.execute(f"SELECT regiao, descricao_viaturas FROM funcionarios WHERE id={ph}", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
         if regiao_user:
             viaturas_sql += f" AND regiao = {ph}"
             viaturas_params.append(regiao_user)
+        elif user_role == "operador":
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            desc_list_user = parse_descricao_viaturas(descricao_user)
+            if desc_list_user:
+                placeholders = ",".join([ph] * len(desc_list_user))
+                viaturas_sql += f" AND COALESCE(descricao,'') IN ({placeholders})"
+                viaturas_params.extend(desc_list_user)
     viaturas_sql += " ORDER BY filial, matricula"
     cur.execute(viaturas_sql, viaturas_params)
     viaturas = [dict(r) for r in cur.fetchall()]
 
-    # Funções de data para cada motor
-    if is_postgres(conn):
-        dt_now = "CURRENT_DATE"
-        dt_fmt = "TO_CHAR(r.data_hora::timestamp, 'YYYY-MM')"
-        dt_eq = "= TO_CHAR(CURRENT_DATE, 'YYYY-MM')"
-        dt_today = "= CURRENT_DATE"
-        dt_7days = ">= CURRENT_DATE - INTERVAL '6 days'"
-        date_func = "r.data_hora::date"  # Para PostgreSQL
-    else:
-        dt_now = "date('now','localtime')"
-        dt_fmt = "strftime('%Y-%m', r.data_hora)"
-        dt_eq = "= strftime('%Y-%m', 'now','localtime')"
-        dt_today = "= date('now','localtime')"
-        dt_7days = ">= date('now','-6 days','localtime')"
-        date_func = "date(r.data_hora)"  # Para SQLite
+    # Datas de referência em Portugal continental (parâmetros, não relógio do servidor)
+    today_str = today_pt_iso()
+    week_start_str = (today_pt() - timedelta(days=6)).isoformat()
+    month_str = today_pt().strftime("%Y-%m")
+    dt_fmt = "substr(r.data_hora, 1, 7)"
+    dt_today_sql = f"date(r.data_hora) = {ph}"
+    dt_today_param = today_str
+    dt_7days_sql = f"date(r.data_hora) >= {ph}"
+    dt_7days_param = week_start_str
+    dt_eq_sql = f"{dt_fmt} = {ph}"
+    dt_eq_param = month_str
 
     # Última limpeza por viatura/protocolo (filtrada por região)
-    datetime_func = sql_datetime(conn, "r.data_hora")
-    last_map_sql = f"""
-        SELECT r.viatura_id, r.protocolo_id, MAX({datetime_func}) AS ult
+    last_map_sql = """
+        SELECT r.viatura_id, r.protocolo_id, MAX(r.data_hora) AS ult
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
         WHERE 1=1
@@ -1614,8 +1393,8 @@ def home():
     last_map = {(r["viatura_id"], r["protocolo_id"]): r["ult"] for r in cur.fetchall()}
 
     # Última (qualquer) por viatura (filtrada por região)
-    last_any_sql = f"""
-        SELECT v.id as viatura_id, MAX({datetime_func}) AS ult
+    last_any_sql = """
+        SELECT v.id as viatura_id, MAX(r.data_hora) AS ult
         FROM viaturas v
         LEFT JOIN registos_limpeza r ON v.id = r.viatura_id
         WHERE v.ativo=1
@@ -1633,9 +1412,9 @@ def home():
         SELECT r.viatura_id, COUNT(*) as n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE {date_func} {dt_today}
+        WHERE {dt_today_sql}
     """
-    limpezas_hoje_params = []
+    limpezas_hoje_params = [dt_today_param]
     if regiao_gestor:
         limpezas_hoje_sql += f" AND v.regiao = {ph}"
         limpezas_hoje_params.append(regiao_gestor)
@@ -1650,9 +1429,9 @@ def home():
         SELECT r.viatura_id, COUNT(*) as n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE {date_func} {dt_today}
+        WHERE {dt_today_sql}
     """
-    limpas_hoje_params = []
+    limpas_hoje_params = [dt_today_param]
     if user_role in ("gestor", "operador"):
         if regiao_user:
             limpas_hoje_sql += f" AND v.regiao = {ph}"
@@ -1670,78 +1449,73 @@ def home():
         SELECT COUNT(*) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE {date_func} {dt_today}
+        WHERE {dt_today_sql}
     """
-    kpi_today_params = []
+    kpi_today_params = [dt_today_param]
     if user_role in ("gestor", "operador"):
         if regiao_user:
             kpi_today_sql += f" AND v.regiao = {ph}"
             kpi_today_params.append(regiao_user)
     cur.execute(kpi_today_sql, kpi_today_params)
-    result = cur.fetchone()
-    kpi_today = result["n"] if isinstance(result, dict) else result[0]
+    kpi_today = cur.fetchone()["n"]
 
     # KPI: viaturas limpas hoje (viaturas distintas limpas pelo menos uma vez hoje)
     kpi_today_veh_sql = f"""
         SELECT COUNT(DISTINCT r.viatura_id) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora){dt_today}
+        WHERE {dt_today_sql}
     """
-    kpi_today_veh_params = []
+    kpi_today_veh_params = [dt_today_param]
     if user_role in ("gestor", "operador"):
         if regiao_user:
             kpi_today_veh_sql += f" AND v.regiao = {ph}"
             kpi_today_veh_params.append(regiao_user)
     cur.execute(kpi_today_veh_sql, kpi_today_veh_params)
-    result = cur.fetchone()
-    kpi_today_veh = result["n"] if isinstance(result, dict) else result[0]
+    kpi_today_veh = cur.fetchone()["n"]
 
     # KPI: total de limpezas hoje (inclui extra)
     kpi_total_limpezas_sql = f"""
         SELECT COUNT(*) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora){dt_today}
+        WHERE {dt_today_sql}
     """
-    kpi_total_limpezas_params = []
+    kpi_total_limpezas_params = [dt_today_param]
     if user_role in ("gestor", "operador"):
         if regiao_user:
             kpi_total_limpezas_sql += f" AND v.regiao = {ph}"
             kpi_total_limpezas_params.append(regiao_user)
     cur.execute(kpi_total_limpezas_sql, kpi_total_limpezas_params)
-    result = cur.fetchone()
-    kpi_total_limpezas = result["n"] if isinstance(result, dict) else result[0]
+    kpi_total_limpezas = cur.fetchone()["n"]
 
     # KPI: registos últimos 7 dias
     kpi_week_sql = f"""
         SELECT COUNT(*) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE date(r.data_hora) {dt_7days}
+        WHERE {dt_7days_sql}
     """
-    kpi_week_params = []
+    kpi_week_params = [dt_7days_param]
     if regiao_gestor:
         kpi_week_sql += f" AND v.regiao = {ph}"
         kpi_week_params.append(regiao_gestor)
     cur.execute(kpi_week_sql, kpi_week_params)
-    result = cur.fetchone()
-    kpi_week = result["n"] if isinstance(result, dict) else result[0]
+    kpi_week = cur.fetchone()["n"]
 
     # KPI: registos este mês
     kpi_month_sql = f"""
         SELECT COUNT(*) AS n
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
-        WHERE {dt_fmt} {dt_eq}
+        WHERE {dt_eq_sql}
     """
-    kpi_month_params = []
+    kpi_month_params = [dt_eq_param]
     if regiao_gestor:
         kpi_month_sql += f" AND v.regiao = {ph}"
         kpi_month_params.append(regiao_gestor)
     cur.execute(kpi_month_sql, kpi_month_params)
-    result = cur.fetchone()
-    kpi_month = result["n"] if isinstance(result, dict) else result[0]
+    kpi_month = cur.fetchone()["n"]
 
     # Limpezas por local
     sql_local = """
@@ -1766,7 +1540,7 @@ def home():
     """
     params_func = []
     sql_func, params_func = filtro_mes_regiao(sql_func, params_func)
-    sql_func += " GROUP BY r.funcionario_id, f.username ORDER BY qty DESC, label"
+    sql_func += " GROUP BY r.funcionario_id ORDER BY qty DESC, label"
     cur.execute(sql_func, params_func)
     chart_func = [(r["label"], r["qty"]) for r in cur.fetchall()]
 
@@ -1780,7 +1554,7 @@ def home():
     """
     params_proto = []
     sql_proto, params_proto = filtro_mes_regiao(sql_proto, params_proto)
-    sql_proto += " GROUP BY r.protocolo_id, p.nome ORDER BY p.nome"
+    sql_proto += " GROUP BY r.protocolo_id ORDER BY p.nome"
     cur.execute(sql_proto, params_proto)
     chart_proto = [(r["label"], r["qty"]) for r in cur.fetchall()]
 
@@ -1788,18 +1562,13 @@ def home():
     # (continua igual ao teu original a partir daqui)
 
     # Média de dias desde última limpeza
-    hoje = date.today()
+    hoje = today_pt()
     dias_por_viatura = []
     for v in viaturas:
         iso = last_any.get(v["id"])
         if not iso:
            continue
-        # Handle both string (SQLite) and datetime (PostgreSQL) formats
-        if isinstance(iso, str):
-            dt = datetime.fromisoformat(iso).date()
-        else:
-            # Assume it's already a datetime object from PostgreSQL
-            dt = iso.date() if hasattr(iso, 'date') else iso
+        dt = datetime.fromisoformat(iso).date()
         dias_por_viatura.append((hoje - dt).days)
     media_dias_ultima = round(sum(dias_por_viatura)/len(dias_por_viatura), 2) if dias_por_viatura else 0.0
     total_viaturas = len(viaturas)
@@ -1926,9 +1695,9 @@ def home():
         FROM registos_limpeza r
         JOIN viaturas v ON v.id = r.viatura_id
         JOIN protocolos p ON p.id = r.protocolo_id
-        WHERE {date_func} {dt_today}
+        WHERE {dt_today_sql}
     """
-    viaturas_proto_params = []
+    viaturas_proto_params = [dt_today_param]
     if regiao_gestor:
         viaturas_proto_sql += f" AND v.regiao = {ph}"
         viaturas_proto_params.append(regiao_gestor)
@@ -1950,16 +1719,15 @@ def home():
     pedidos_pendentes = []
     if user_role in ["admin", "gestor"]:
         gestor_id = user_id
-        ph = sql_placeholder(conn)
-        today_condition = sql_today_condition(conn, "pa.data_pedido")
+        ped_hoje_sql, ped_hoje_val = sql_date_eq_today("pa.data_pedido", conn)
         cur.execute(f"""
             SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
             FROM pedidos_autorizacao pa
             JOIN viaturas v ON v.id = pa.viatura_id
             JOIN funcionarios f ON f.id = pa.funcionario_id
-            WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
+            WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {ped_hoje_sql}
             ORDER BY pa.data_pedido DESC
-        """, (gestor_id,))
+        """, (gestor_id, ped_hoje_val))
         pedidos_pendentes = [dict(r) for r in cur.fetchall()]
 
     conn.close()
@@ -1987,321 +1755,18 @@ def pedidos_autorizacao():
     conn = get_conn()
     cur = conn.cursor()
     ph = sql_placeholder(conn)
-    # Usando função auxiliar para condição de data de hoje
-    today_condition = sql_today_condition(conn, "pa.data_pedido")
+    ped_hoje_sql, ped_hoje_val = sql_date_eq_today("pa.data_pedido", conn)
     cur.execute(f"""
         SELECT pa.id, v.matricula, v.num_frota, f.nome as operador
         FROM pedidos_autorizacao pa
         JOIN viaturas v ON v.id = pa.viatura_id
         JOIN funcionarios f ON f.id = pa.funcionario_id
-        WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
+        WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {ped_hoje_sql}
         ORDER BY pa.data_pedido DESC
-    """, (gestor_id,))
+    """, (gestor_id, ped_hoje_val))
     pedidos = [dict(r) for r in cur.fetchall()]
     conn.close()
     return render_template("pedidos_autorizacao.html", pedidos=pedidos, signature=APP_SIGNATURE)
-
-@app.route("/api/pedidos_pendentes")
-@login_required
-@require_perm("dashboard:view")
-def api_pedidos_pendentes():
-    """API endpoint para buscar pedidos pendentes (para auto-refresh)"""
-    user_role = session.get("role")
-    user_id = session.get("user_id")
-    
-    if user_role not in ["admin", "gestor"]:
-        return {"pedidos": []}
-    
-    conn = get_conn()
-    cur = conn.cursor()
-    ph = sql_placeholder(conn)
-    today_condition = sql_today_condition(conn, "pa.data_pedido")
-    
-    cur.execute(f"""
-        SELECT pa.id, v.matricula, v.num_frota, f.nome as operador, pa.data_pedido
-        FROM pedidos_autorizacao pa
-        JOIN viaturas v ON v.id = pa.viatura_id
-        JOIN funcionarios f ON f.id = pa.funcionario_id
-        WHERE pa.validado=0 AND pa.destinatario_id={ph} AND {today_condition}
-        ORDER BY pa.data_pedido DESC
-    """, (user_id,))
-    
-    pedidos = []
-    for row in cur.fetchall():
-        pedidos.append({
-            "id": row["id"],
-            "matricula": row["matricula"],
-            "num_frota": row["num_frota"],
-            "operador": row["operador"],
-            "data_pedido": row["data_pedido"].strftime("%H:%M") if row["data_pedido"] else ""
-        })
-    
-    conn.close()
-    return {"pedidos": pedidos, "count": len(pedidos)}
-
-@app.route("/api/meus_pedidos_status")
-@login_required
-def api_meus_pedidos_status():
-    """API endpoint para operador verificar status dos seus pedidos"""
-    user_id = session.get("user_id")
-    
-    conn = get_conn()
-    cur = conn.cursor()
-    ph = sql_placeholder(conn)
-    today_condition = sql_today_condition(conn, "pa.data_pedido")
-    
-    # Busca pedidos do usuário de hoje (validados e pendentes)
-    cur.execute(f"""
-        SELECT pa.id, pa.validado, pa.data_validacao, v.matricula, v.num_frota,
-               g.nome as gestor_nome, pa.data_pedido
-        FROM pedidos_autorizacao pa
-        JOIN viaturas v ON v.id = pa.viatura_id
-        LEFT JOIN funcionarios g ON g.id = pa.validado_por
-        WHERE pa.funcionario_id={ph} AND {today_condition}
-        ORDER BY pa.data_pedido DESC
-    """, (user_id,))
-    
-    pedidos = []
-    autorizados_recentes = 0
-    
-    for row in cur.fetchall():
-        pedido = {
-            "id": row["id"],
-            "validado": bool(row["validado"]),
-            "matricula": row["matricula"],
-            "num_frota": row["num_frota"], 
-            "gestor_nome": row["gestor_nome"],
-            "data_pedido": row["data_pedido"].strftime("%H:%M") if row["data_pedido"] else "",
-            "data_validacao": row["data_validacao"].strftime("%H:%M") if row["data_validacao"] else ""
-        }
-        pedidos.append(pedido)
-        
-        # Conta autorizações dos últimos 2 minutos (para notificação)
-        if row["validado"] and row["data_validacao"]:
-            from datetime import datetime, timedelta
-            if datetime.now() - row["data_validacao"] < timedelta(minutes=2):
-                autorizados_recentes += 1
-    
-    conn.close()
-    return {
-        "pedidos": pedidos, 
-        "total": len(pedidos),
-        "autorizados": len([p for p in pedidos if p["validado"]]),
-        "pendentes": len([p for p in pedidos if not p["validado"]]),
-        "autorizados_recentes": autorizados_recentes
-    }
-
-@app.route("/auto-refresh.js")
-def auto_refresh_js():
-    """Serve JavaScript para auto-refresh dos pedidos pendentes"""
-    js_content = """
-// Auto-refresh para pedidos pendentes no dashboard e status de autorizações
-(function() {
-    let refreshInterval;
-    let lastCount = 0;
-    let lastAutorizados = 0;
-    
-    function updatePedidosPendentes() {
-        fetch('/api/pedidos_pendentes')
-            .then(response => response.json())
-            .then(data => {
-                const container = document.getElementById('pedidos-pendentes-container');
-                if (!container) return;
-                
-                // Se o número de pedidos mudou, atualiza a interface
-                if (data.count !== lastCount) {
-                    lastCount = data.count;
-                    
-                    // Atualiza o contador no badge
-                    const badge = document.querySelector('.pedidos-badge');
-                    if (badge) {
-                        badge.textContent = data.count;
-                        badge.style.display = data.count > 0 ? 'inline' : 'none';
-                    }
-                    
-                    // Atualiza a lista de pedidos
-                    if (data.pedidos.length > 0) {
-                        let html = '<div class="alert alert-warning"><h5>Pedidos de Autorização Pendentes:</h5><ul>';
-                        data.pedidos.forEach(p => {
-                            html += `<li><strong>${p.matricula}</strong> (${p.num_frota}) - ${p.operador}`;
-                            html += ` <small>(${p.data_pedido})</small>`;
-                            html += ` <a href="/validar_pedido_autorizacao/${p.id}" class="btn btn-sm btn-success" onclick="return confirm('Autorizar limpeza extra?')">Autorizar</a></li>`;
-                        });
-                        html += '</ul></div>';
-                        container.innerHTML = html;
-                    } else {
-                        container.innerHTML = '';
-                    }
-                    
-                    // Atualiza título da página
-                    const originalTitle = document.title.replace(/^\(\d+\) /, '');
-                    if (data.count > 0) {
-                        document.title = `(${data.count}) ${originalTitle}`;
-                    } else {
-                        document.title = originalTitle;
-                    }
-                    
-                    // Mostra notificação se há novos pedidos e notificações estão ativadas
-                    if (data.count > 0 && window.lastNotifiedCount !== data.count && notificationsEnabled()) {
-                        showNotification(`${data.count} pedido(s) de autorização pendente(s)`);
-                        window.lastNotifiedCount = data.count;
-                    }
-                }
-            })
-            .catch(error => console.log('Erro ao buscar pedidos:', error));
-    }
-    
-    function updateMeusPedidosStatus() {
-        fetch('/api/meus_pedidos_status')
-            .then(response => response.json())
-            .then(data => {
-                // Atualiza contador no título para operadores
-                const originalTitle = document.title.replace(/^\(\d+\) /, '');
-                if (data.autorizados_recentes > 0) {
-                    document.title = `(${data.autorizados_recentes}) ${originalTitle}`;
-                } else if (data.pendentes > 0) {
-                    document.title = `(${data.pendentes}⏳) ${originalTitle}`;
-                } else {
-                    document.title = originalTitle;
-                }
-                
-                // Atualiza área de status dos pedidos (se existir)
-                const statusContainer = document.getElementById('meus-pedidos-status');
-                if (statusContainer) {
-                    let html = '';
-                    if (data.pedidos.length > 0) {
-                        html += '<div class="card mt-3"><div class="card-header"><h6>Meus Pedidos de Hoje</h6></div><div class="card-body">';
-                        data.pedidos.forEach(p => {
-                            const status = p.validado ? 
-                                `<span class="badge bg-success">✅ Autorizado por ${p.gestor_nome} às ${p.data_validacao}</span>` : 
-                                `<span class="badge bg-warning">⏳ Pendente</span>`;
-                            html += `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
-                                <span><strong>${p.matricula}</strong> (${p.num_frota}) - ${p.data_pedido}</span>
-                                ${status}
-                            </div>`;
-                        });
-                        html += '</div></div>';
-                    }
-                    statusContainer.innerHTML = html;
-                }
-                
-                // Notifica sobre autorizações recentes
-                if (data.autorizados_recentes > 0 && lastAutorizados !== data.autorizados_recentes && notificationsEnabled()) {
-                    showNotification(`🎉 ${data.autorizados_recentes} pedido(s) autorizado(s)! Já pode efetuar limpeza extra.`, 'success');
-                    lastAutorizados = data.autorizados_recentes;
-                }
-            })
-            .catch(error => console.log('Erro ao buscar status dos pedidos:', error));
-    }
-    
-    function showNotification(message, type = 'info') {
-        // Cria notificação visual simples
-        const notification = document.createElement('div');
-        const alertClass = type === 'success' ? 'alert-success' : 'alert-info';
-        const icon = type === 'success' ? '🎉' : '🔔';
-        const title = type === 'success' ? 'Pedido Autorizado!' : 'Nova solicitação!';
-        
-        notification.className = `alert ${alertClass} alert-dismissible`;
-        notification.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 1050; min-width: 300px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);';
-        notification.innerHTML = `
-            <strong>${icon} ${title}</strong> ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" onclick="this.parentElement.remove()"></button>
-        `;
-        document.body.appendChild(notification);
-        
-        // Tenta tocar som de notificação (se permitido pelo browser)
-        try {
-            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hUEAtGn+Lvt2UnAC+C1/HHdSsFKH/N8Nh+NgUZab3o45JAEApRo+PwuGIaAjOH2fPBCy0EJHjI7Ox9OAUWVbLm4x1LFAtKq+3tv2IkAyh9VPHBdOEWvvz25'></audio>");
-            audio.volume = 0.3;
-            audio.play().catch(() => {}); // Ignora erros se som não funcionar
-        } catch (e) {}
-        
-        // Remove após 8 segundos
-        setTimeout(() => {
-            if (notification.parentNode) {
-                notification.parentNode.removeChild(notification);
-            }
-        }, 8000);
-    }
-    
-    // Função para alternar notificações
-    window.toggleNotifications = function() {
-        const enabled = localStorage.getItem('notificationsEnabled') !== 'false';
-        localStorage.setItem('notificationsEnabled', (!enabled).toString());
-        const btn = document.getElementById('toggle-notifications-btn');
-        if (btn) {
-            btn.textContent = enabled ? '🔔 Ativar Notificações' : '🔕 Desativar Notificações';
-            btn.className = enabled ? 'btn btn-outline-secondary btn-sm' : 'btn btn-warning btn-sm';
-        }
-        return !enabled;
-    };
-    
-    // Verifica se notificações estão habilitadas
-    function notificationsEnabled() {
-        return localStorage.getItem('notificationsEnabled') !== 'false';
-    }
-    
-    // Detecta tipo de usuário através de elementos na página
-    function detectUserType() {
-        // Se existe container de pedidos pendentes, é gestor/admin
-        if (document.getElementById('pedidos-pendentes-container')) {
-            return 'gestor';
-        }
-        // Se existe botão de novo registo, é operador
-        if (document.querySelector('a[href*="novo"]') || document.querySelector('a[href*="registo"]')) {
-            return 'operador';
-        }
-        return 'unknown';
-    }
-    
-    // Inicia o auto-refresh quando a página carrega
-    document.addEventListener('DOMContentLoaded', function() {
-        // Verifica se estamos na página principal
-        if (window.location.pathname === '/' || window.location.pathname === '/home') {
-            const userType = detectUserType();
-            
-            // Adiciona botão para controlar notificações
-            const nav = document.querySelector('.navbar-nav');
-            if (nav && !document.getElementById('toggle-notifications-btn')) {
-                const li = document.createElement('li');
-                li.className = 'nav-item';
-                const enabled = notificationsEnabled();
-                li.innerHTML = `<button id="toggle-notifications-btn" class="${enabled ? 'btn btn-warning btn-sm' : 'btn btn-outline-secondary btn-sm'}" onclick="toggleNotifications()" style="margin: 5px;">${enabled ? '🔕 Desativar Notificações' : '🔔 Ativar Notificações'}</button>`;
-                nav.appendChild(li);
-            }
-            
-            // Adiciona container para status dos pedidos do operador se não existir
-            if (userType === 'operador') {
-                const main = document.querySelector('main') || document.querySelector('.container');
-                if (main && !document.getElementById('meus-pedidos-status')) {
-                    const statusDiv = document.createElement('div');
-                    statusDiv.id = 'meus-pedidos-status';
-                    main.insertBefore(statusDiv, main.firstChild);
-                }
-            }
-            
-            // Inicia verificações baseado no tipo de usuário
-            if (userType === 'gestor') {
-                updatePedidosPendentes(); // Primeira verificação
-                refreshInterval = setInterval(updatePedidosPendentes, 30000); // A cada 30 segundos
-            } else if (userType === 'operador') {
-                updateMeusPedidosStatus(); // Primeira verificação
-                refreshInterval = setInterval(updateMeusPedidosStatus, 20000); // A cada 20 segundos (mais rápido para operadores)
-            }
-        }
-    });
-    
-    // Para o refresh quando sair da página
-    window.addEventListener('beforeunload', function() {
-        if (refreshInterval) {
-            clearInterval(refreshInterval);
-        }
-    });
-})();
-"""
-    response = Response(js_content, mimetype='application/javascript')
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    return response
 
 @app.route("/validar_pedido_autorizacao/<int:pedido_id>", methods=["POST"])
 @login_required
@@ -2310,31 +1775,14 @@ def validar_pedido_autorizacao(pedido_id):
     conn = get_conn()
     cur = conn.cursor()
     ph = sql_placeholder(conn)
-    
-    # Busca dados do pedido antes de autorizar (para log/notificação)
-    cur.execute(f"""
-        SELECT pa.funcionario_id, v.matricula, v.num_frota, f.nome as operador_nome
-        FROM pedidos_autorizacao pa
-        JOIN viaturas v ON v.id = pa.viatura_id  
-        JOIN funcionarios f ON f.id = pa.funcionario_id
-        WHERE pa.id={ph}
-    """, (pedido_id,))
-    pedido_info = cur.fetchone()
-    
     # Compatível com SQLite e PostgreSQL para timestamp
     if is_postgres(conn):
         cur.execute(f"UPDATE pedidos_autorizacao SET validado=1, validado_por={ph}, data_validacao=NOW() WHERE id={ph}", (session["user_id"], pedido_id))
     else:
         cur.execute(f"UPDATE pedidos_autorizacao SET validado=1, validado_por={ph}, data_validacao=CURRENT_TIMESTAMP WHERE id={ph}", (session["user_id"], pedido_id))
-    
     conn.commit()
     conn.close()
-    
-    if pedido_info:
-        flash(f"Pedido autorizado para {pedido_info['operador_nome']} - {pedido_info['matricula']} ({pedido_info['num_frota']})!", "success")
-    else:
-        flash("Pedido autorizado!", "success")
-        
+    flash("Pedido autorizado!", "success")
     return redirect(url_for("pedidos_autorizacao"))
 
 # -----------------------------------------------------------------------------
@@ -2347,6 +1795,7 @@ def exportar_viaturas_csv():
     q_matricula = (request.args.get("matricula") or "").strip()
     q_num_frota = (request.args.get("num_frota") or "").strip()
     f_regiao = (request.args.get("regiao") or "").strip()
+    access_desc_list: list[str] = []
     f_operacao = (request.args.get("operacao") or "").strip()
     f_marca = (request.args.get("marca") or "").strip()
     f_modelo = (request.args.get("modelo") or "").strip()
@@ -2357,6 +1806,20 @@ def exportar_viaturas_csv():
     ph = sql_placeholder(conn)
     where = ["1=1"]
     params = []
+
+    # Restrições de acesso pelo perfil
+    if session.get("role") in ("gestor", "operador"):
+        cur.execute(
+            f"SELECT regiao, descricao_viaturas FROM funcionarios WHERE id={ph}",
+            (session.get("user_id"),),
+        )
+        row = cur.fetchone()
+        regiao_user = (row["regiao"] or "").strip() if row else ""
+        if regiao_user:
+            f_regiao = regiao_user
+        elif session.get("role") == "operador":
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            access_desc_list = parse_descricao_viaturas(descricao_user)
     if q_matricula:
         where.append(f"v.matricula LIKE {ph}")
         params.append(f"%{q_matricula}%")
@@ -2366,6 +1829,10 @@ def exportar_viaturas_csv():
     if f_regiao:
         where.append(f"COALESCE(v.regiao,'') = {ph}")
         params.append(f_regiao)
+    if access_desc_list:
+        placeholders = ",".join([ph] * len(access_desc_list))
+        where.append(f"COALESCE(v.descricao,'') IN ({placeholders})")
+        params.extend(access_desc_list)
     if f_operacao:
         where.append(f"COALESCE(v.operacao,'') = {ph}")
         params.append(f_operacao)
@@ -2380,9 +1847,10 @@ def exportar_viaturas_csv():
         params.append(int(f_ativo))
 
     cur.execute(f"""
-    SELECT v.id, v.matricula, v.num_frota,
+    SELECT v.id, v.matricula,
+           COALESCE(v.numero_frota, v.num_frota) AS numero_frota,
            v.regiao, v.operacao, v.marca, v.modelo, v.tipo_protocolo,
-           v.descricao, v.filial, v.ativo, v.criado_em
+           v.descricao, v.filial, v.num_frota, v.ativo, v.criado_em
     FROM viaturas v
     WHERE { " AND ".join(where) }
     ORDER BY v.matricula
@@ -2398,7 +1866,7 @@ def exportar_viaturas_csv():
     w.writerow(headers)
     for r in rows:
         w.writerow([
-            r["matricula"], r["num_frota"] or "", r["regiao"] or "", r["operacao"] or "",
+            r["matricula"], r["numero_frota"] or "", r["regiao"] or "", r["operacao"] or "",
             r["marca"] or "", r["modelo"] or "", r["tipo_protocolo"] or "",
             "Sim" if int(r["ativo"] or 0) else "Não", r["descricao"] or "", r["filial"] or "",
             r["num_frota"] or "", r["criado_em"] or "", r["id"],
@@ -2414,6 +1882,9 @@ def viaturas():
     conn = get_conn()
     cur = conn.cursor()
     ph = sql_placeholder(conn)
+    viaturas_cols = table_columns(conn, "viaturas")
+    has_numero_frota = "numero_frota" in viaturas_cols
+    num_frota_expr = "COALESCE(v.numero_frota, v.num_frota)" if has_numero_frota else "v.num_frota"
 
     # filtros
     q_matricula = (request.args.get("matricula") or "").strip()
@@ -2425,14 +1896,23 @@ def viaturas():
     f_tipo = (request.args.get("tipo_protocolo") or "").strip()
     f_ativo = (request.args.get("ativo") or "").strip()
     f_filial = (request.args.get("filial") or "").strip()
+    f_desc_list: list[str] = []
 
     # Se for gestor, força filtro pela sua região
     if session.get("role") in ("gestor", "operador"):
-        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (session.get("user_id"),))
+        cur.execute(
+            f"SELECT regiao, descricao_viaturas FROM funcionarios WHERE id={ph}",
+            (session.get("user_id"),),
+        )
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row else ""
         if regiao_user:
             f_regiao = regiao_user
+        else:
+            # Operador com região vazia: restringir por lista de descrições
+            if session.get("role") == "operador":
+                descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+                f_desc_list = parse_descricao_viaturas(descricao_user)
 
     if request.method == "POST":
         matricula = (request.form.get("matricula") or "").strip()
@@ -2473,9 +1953,18 @@ def viaturas():
     if q_matricula:
         where.append(f"v.matricula LIKE {ph}"); params.append(f"%{q_matricula}%")
     if q_num_frota:
-        where.append(f"(v.numero_frota = {ph} OR v.num_frota = {ph})"); params.extend([q_num_frota, q_num_frota])
+        if has_numero_frota:
+            where.append(f"(v.numero_frota = {ph} OR v.num_frota = {ph})")
+            params.extend([q_num_frota, q_num_frota])
+        else:
+            where.append(f"v.num_frota = {ph}")
+            params.append(q_num_frota)
     if f_regiao:
         where.append(f"COALESCE(v.regiao,'') = {ph}"); params.append(f_regiao)
+    if f_desc_list:
+        placeholders = ",".join([ph] * len(f_desc_list))
+        where.append(f"COALESCE(v.descricao,'') IN ({placeholders})")
+        params.extend(f_desc_list)
     if f_operacao:
         where.append(f"COALESCE(v.operacao,'') = {ph}"); params.append(f_operacao)
     if f_marca:
@@ -2489,16 +1978,14 @@ def viaturas():
     if f_filial:
         where.append(f"COALESCE(v.filial,'') = {ph}"); params.append(f_filial)
 
-    datetime_func = sql_datetime(conn, "data_hora")
-    datetime_func_r = sql_datetime(conn, "r.data_hora")
     cur.execute(f"""
         WITH last AS (
           SELECT r.*
           FROM registos_limpeza r
           JOIN (
-            SELECT viatura_id, MAX({datetime_func}) AS ult
+            SELECT viatura_id, MAX(data_hora) AS ult
             FROM registos_limpeza GROUP BY viatura_id
-          ) m ON m.viatura_id=r.viatura_id AND {datetime_func_r}=m.ult
+          ) m ON m.viatura_id=r.viatura_id AND r.data_hora=m.ult
         ),
         verificados AS (
           SELECT viatura_id, COUNT(*) AS n
@@ -2507,7 +1994,7 @@ def viaturas():
           GROUP BY viatura_id
         )
         SELECT v.id, v.matricula, v.descricao, v.filial,
-               v.num_frota,
+               {num_frota_expr} AS num_frota,
                v.regiao, v.operacao, v.marca, v.modelo, v.tipo_protocolo, v.ativo,
                l.local AS ultima_local, l.hora_inicio, l.hora_fim,
                f.username AS ultima_user
@@ -2523,35 +2010,48 @@ def viaturas():
     cur.execute("SELECT id, nome, frequencia_dias FROM protocolos WHERE UPPER(nome) IN ('PROTOCOLO B', 'PROTOCOLO C')")
     protocolos_bc = {r["nome"].upper(): dict(r) for r in cur.fetchall()}
 
-    hoje = date.today()
+    hoje = today_pt()
     for v in vs:
         v["tem_atraso"] = False
         for nome in ("PROTOCOLO B", "PROTOCOLO C"):
+            ins_key = "b" if nome.endswith("B") else "c"
             prot = protocolos_bc.get(nome)
             if not prot:
                 v[f"dias_{nome.replace(' ', '_').lower()}"] = None
                 v[f"freq_{nome.replace(' ', '_').lower()}"] = None
+                v[f"dias_inspecao_{ins_key}"] = None
+                v[f"freq_inspecao_{ins_key}"] = None
                 continue
-            date_sql = sql_date(conn, "r.data_hora")
             cur.execute(f"""
-                SELECT MAX({date_sql}) as ult
+                SELECT MAX(date(r.data_hora)) as ult
                 FROM registos_limpeza r
                 WHERE r.viatura_id={ph} AND r.protocolo_id={ph}
             """, (v["id"], prot["id"]))
-            result = cur.fetchone()
-            ult = result["ult"] if isinstance(result, dict) else result[0]
+            ult = cur.fetchone()["ult"]
             if ult:
-                # Handle both string (SQLite) and datetime (PostgreSQL) formats
-                if isinstance(ult, str):
-                    dias = (hoje - datetime.fromisoformat(ult).date()).days
-                else:
-                    # Assume it's already a datetime object from PostgreSQL
-                    dt = ult.date() if hasattr(ult, 'date') else ult
-                    dias = (hoje - dt).days
+                dias = (hoje - datetime.fromisoformat(ult).date()).days
             else:
                 dias = None
             v[f"dias_{nome.replace(' ', '_').lower()}"] = dias
             v[f"freq_{nome.replace(' ', '_').lower()}"] = prot["frequencia_dias"]
+
+            # Dias desde a última inspeção (verificação registada pelo gestor)
+            cur.execute(f"""
+                SELECT MAX(date(COALESCE(r.verificacao_em, r.data_hora))) as ult
+                FROM registos_limpeza r
+                WHERE r.viatura_id={ph}
+                  AND r.protocolo_id={ph}
+                  AND r.verificacao_limpeza IS NOT NULL
+                  AND TRIM(r.verificacao_limpeza) <> ''
+            """, (v["id"], prot["id"]))
+            ult_i = cur.fetchone()["ult"]
+            if ult_i:
+                dias_inspecao = (hoje - datetime.fromisoformat(ult_i).date()).days
+            else:
+                dias_inspecao = None
+            v[f"dias_inspecao_{ins_key}"] = dias_inspecao
+            v[f"freq_inspecao_{ins_key}"] = prot["frequencia_dias"]
+
             # Verifica atraso
             if dias is not None and prot["frequencia_dias"] is not None and dias > prot["frequencia_dias"]:
                 v["tem_atraso"] = True
@@ -2584,8 +2084,27 @@ def verificar_limpeza(registo_id):
     cur = conn.cursor()
     ph = sql_placeholder(conn)
     if request.method == "POST":
-        verificacao = request.form.get("verificacao_limpeza")
-        cur.execute(f"UPDATE registos_limpeza SET verificacao_limpeza={ph} WHERE id={ph}", (verificacao, registo_id))
+        verificacao = (request.form.get("verificacao_limpeza") or "").strip()
+        comentarios = (request.form.get("comentarios_verificacao") or "").strip()
+        if not verificacao:
+            flash("Selecione o tipo de verificação.", "danger")
+            conn.close()
+            return redirect(url_for("verificar_limpeza", registo_id=registo_id))
+
+        if verificacao.lower() in {"não conforme", "nao conforme"} and not comentarios:
+            flash("Indique o comentário quando a verificação é 'não conforme'.", "danger")
+            conn.close()
+            return redirect(url_for("verificar_limpeza", registo_id=registo_id))
+
+        comentarios_to_save = comentarios if verificacao.lower() in {"não conforme", "nao conforme"} else None
+        cur.execute(
+            f"""UPDATE registos_limpeza
+                SET verificacao_limpeza={ph},
+                    comentarios_verificacao={ph},
+                    verificacao_em={ph}
+                WHERE id={ph}""",
+            (verificacao, comentarios_to_save, now_pt_iso(), registo_id),
+        )
         conn.commit()
         conn.close()
         flash("Verificação de limpeza registada.", "success")
@@ -2597,6 +2116,54 @@ def verificar_limpeza(registo_id):
         flash("Registo não encontrado.", "danger")
         return redirect(url_for("registos"))
     return render_template("verificar_limpeza.html", registo=registo, signature=APP_SIGNATURE)
+
+@app.route("/gestor/verificacoes", methods=["GET", "POST"])
+@login_required
+@require_perm("dashboard:view")
+def gestor_verificacoes():
+    # A funcionalidade pedida é exclusiva ao perfil gestor.
+    if session.get("role") != "gestor":
+        flash("Apenas o perfil gestor pode registar verificações em lote.", "danger")
+        return redirect(url_for("home"))
+
+    conn = get_conn()
+    cur = conn.cursor()
+    ph = sql_placeholder(conn)
+
+    # Região do gestor
+    cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (session.get("user_id"),))
+    row = cur.fetchone()
+    regiao_gestor = (row["regiao"] or "").strip() if row else None
+
+    if request.method == "POST":
+        selected = request.form.getlist("registos")
+        if not selected:
+            flash("Selecione pelo menos um registo para inspecionar ou alterar.", "warning")
+            conn.close()
+            return redirect(url_for("gestor_verificacoes"))
+
+        erros = _processar_verificacoes_gestor(cur, ph, selected)
+        if erros:
+            conn.rollback()
+            conn.close()
+            flash(" | ".join(erros), "danger")
+            return redirect(url_for("gestor_verificacoes"))
+
+        conn.commit()
+        conn.close()
+        flash("Verificações registadas/atualizadas com sucesso.", "success")
+        return redirect(url_for("gestor_verificacoes"))
+
+    pendentes = _gestor_ultimos_registos_verificacao(cur, ph, regiao_gestor, apenas_pendentes=True)
+    verificados = _gestor_ultimos_registos_verificacao(cur, ph, regiao_gestor, apenas_pendentes=False)
+    conn.close()
+
+    return render_template(
+        "gestor_verificacoes.html",
+        pendentes=pendentes,
+        verificados=verificados,
+        signature=APP_SIGNATURE,
+    )
 
 @app.route("/registos/<int:rid>", methods=["GET", "POST"])
 @login_required
@@ -2615,7 +2182,7 @@ def registo_detalhe(rid):
         # Anexos
         files = request.files.getlist("ficheiros")
         if files:
-            day_dir = UPLOAD_DIR / datetime.now().strftime("%Y-%m-%d")
+            day_dir = UPLOAD_DIR / now_pt().strftime("%Y-%m-%d")
             day_dir.mkdir(parents=True, exist_ok=True)
             for f in files:
                 if not f or f.filename == "": continue
@@ -2661,17 +2228,18 @@ def editar_viatura(viatura_id):
     ph = sql_placeholder(conn)
     if request.method == "POST":
         regiao = request.form.get("regiao") or None
+        descricao = (request.form.get("descricao") or "").strip() or None
         verificacao_limpeza = request.form.get("verificacao_limpeza") or None
         # Só admin pode alterar a região
         if session.get("role") == "admin":
             cur.execute(
-                f"UPDATE viaturas SET regiao={ph}, verificacao_limpeza={ph} WHERE id={ph}",
-                (regiao, verificacao_limpeza, viatura_id)
+                f"UPDATE viaturas SET regiao={ph}, descricao={ph}, verificacao_limpeza={ph} WHERE id={ph}",
+                (regiao, descricao, verificacao_limpeza, viatura_id)
             )
         else:
             cur.execute(
-                f"UPDATE viaturas SET verificacao_limpeza={ph} WHERE id={ph}",
-                (verificacao_limpeza, viatura_id)
+                f"UPDATE viaturas SET descricao={ph}, verificacao_limpeza={ph} WHERE id={ph}",
+                (descricao, verificacao_limpeza, viatura_id)
             )
         conn.commit()
         conn.close()
@@ -2776,28 +2344,16 @@ def importar_viaturas():
     ph = sql_placeholder(conn)
     # garantir colunas
     try:
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'viaturas'")
-            vcols = {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            cur.execute("PRAGMA table_info(viaturas)")
-            vcols = {r["name"] for r in cur.fetchall()}
+        cur.execute("PRAGMA table_info(viaturas)")
+        vcols = {r["name"] for r in cur.fetchall()}
     except Exception:
         vcols = set()
     for col in ("regiao","operacao","marca","modelo"):
         if col not in vcols:
             try:
-                if is_postgres(conn):
-                    cur.execute(f"SAVEPOINT add_{col}_vcol")
                 cur.execute(f"ALTER TABLE viaturas ADD COLUMN {col} TEXT")
-                if is_postgres(conn):
-                    cur.execute(f"RELEASE SAVEPOINT add_{col}_vcol")
             except Exception:
-                if is_postgres(conn):
-                    try:
-                        cur.execute(f"ROLLBACK TO SAVEPOINT add_{col}_vcol")
-                    except:
-                        pass
+                pass
 
     def _as_bool(v):
         s = (str(v or "").strip().lower())
@@ -2884,75 +2440,20 @@ def ativar_desativar_viatura(viatura_id):
 @login_required
 @require_perm("viaturas:view")
 def exportar_viaturas_excel():
-    try:
-        from pandas_config import PANDAS_AVAILABLE, pd
-        
-        if not PANDAS_AVAILABLE:
-            flash("Funcionalidade Excel não está disponível no momento.", "error")
-            return redirect(url_for("viaturas"))
-        
-        print("DEBUG: Iniciando exportação viaturas Excel")
-        conn = get_conn()
-        cur = conn.cursor()
-        
-        # Check if viaturas table has data first
-        cur.execute("SELECT COUNT(*) as count FROM viaturas")
-        count_result = cur.fetchone()
-        viaturas_count = count_result["count"]
-        print(f"DEBUG: Total viaturas na tabela: {viaturas_count}")
-        
-        # Use COALESCE for potentially missing columns
-        cur.execute("""
-            SELECT 
-                id, 
-                matricula, 
-                COALESCE(num_frota, '') as num_frota, 
-                COALESCE(regiao, '') as regiao, 
-                COALESCE(operacao, '') as operacao, 
-                COALESCE(marca, '') as marca, 
-                COALESCE(modelo, '') as modelo, 
-                COALESCE(tipo_protocolo, '') as tipo_protocolo, 
-                COALESCE(descricao, '') as descricao, 
-                COALESCE(filial, '') as filial, 
-                ativo, 
-                criado_em
-            FROM viaturas
-            ORDER BY matricula
-        """)
-        rows = [dict(r) for r in cur.fetchall()]
-        print(f"DEBUG: Rows fetched from viaturas: {len(rows)}")
-        if rows:
-            print(f"DEBUG: First row: {rows[0]}")
-        
-        conn.close()
-        
-        if not rows:
-            print("DEBUG: No viaturas data - creating empty DataFrame")
-            # Create empty DataFrame with proper columns
-            df = pd.DataFrame(columns=[
-                "id", "matricula", "num_frota", "regiao", "operacao", 
-                "marca", "modelo", "tipo_protocolo", "descricao", "filial", "ativo", "criado_em"
-            ])
-        else:
-            df = pd.DataFrame(rows)
-            
-        print(f"DEBUG: DataFrame shape: {df.shape}")
-        print(f"DEBUG: DataFrame columns: {list(df.columns)}")
-        if not df.empty:
-            print(f"DEBUG: DataFrame head:\n{df.head()}")
-
-        fname = EXPORT_DIR / f"viaturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        df.to_excel(fname, index=False, sheet_name="Viaturas")
-        print(f"DEBUG: Excel file created: {fname}")
-        return send_file(fname, as_attachment=True)
-        
-    except Exception as e:
-        print(f"❌ ERRO na exportação viaturas Excel: {str(e)}")
-        print(f"❌ Tipo do erro: {type(e).__name__}")
-        import traceback
-        print(f"❌ Traceback completo: {traceback.format_exc()}")
-        flash(f"Erro na exportação: {str(e)}", "error")
-        return redirect(url_for("viaturas"))
+    import pandas as pd
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, criado_em
+        FROM viaturas
+        ORDER BY matricula
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    df = pd.DataFrame(rows)
+    fname = EXPORT_DIR / f"viaturas_{now_pt().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    df.to_excel(fname, index=False, sheet_name="Viaturas")
+    return send_file(fname, as_attachment=True)
 # -----------------------------------------------------------------------------
 # Protocolos (listar / editar / novo)
 # -----------------------------------------------------------------------------
@@ -3009,9 +2510,10 @@ def protocolo_novo():
         conn = get_conn()
         cur = conn.cursor()
         try:
-            cur.execute(fix_sql_placeholders(conn,
-                "INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo, custo_limpeza) VALUES (?,?,?,?,?)"
-            ), (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza))
+            cur.execute(
+                "INSERT INTO protocolos (nome, passos_json, frequencia_dias, ativo, custo_limpeza) VALUES (?,?,?,?,?)",
+                (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza),
+            )
             conn.commit()
             flash("Protocolo criado com sucesso.", "info")
             return redirect(url_for("protocolos"))
@@ -3057,11 +2559,11 @@ def protocolo_editar(pid: int):
             return redirect(url_for("protocolo_editar", pid=pid))
 
         try:
-            cur.execute(fix_sql_placeholders(conn, """
+            cur.execute("""
                 UPDATE protocolos
                    SET nome=?, passos_json=?, frequencia_dias=?, ativo=?, custo_limpeza=?
                  WHERE id=?
-            """), (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza, pid))
+            """, (nome, _passos_to_json(passos_txt), frequencia, ativo, custo_limpeza, pid))
             if cur.rowcount == 0:
                 flash("Protocolo não encontrado.", "danger")
             else:
@@ -3074,8 +2576,7 @@ def protocolo_editar(pid: int):
         finally:
             conn.close()
 
-    ph = sql_placeholder(conn)
-    cur.execute(f"SELECT * FROM protocolos WHERE id={ph}", (pid,))
+    cur.execute("SELECT * FROM protocolos WHERE id=?", (pid,))
     p = cur.fetchone()
     conn.close()
     if not p:
@@ -3102,23 +2603,14 @@ def admin_run_migrations():
 
     # Helper para ver colunas
     def cols(table):
-        if is_postgres(conn):
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", (table,))
-            return {r['column_name'] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
-        else:
-            return {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall()}
+        return {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall()}
 
     done = []
 
     # 1) Criar tabela protocolos (se não existir)
-    if is_postgres(conn):
-        id_field = "id SERIAL PRIMARY KEY"
-    else:
-        id_field = "id INTEGER PRIMARY KEY AUTOINCREMENT"
-        
-    cur.execute(f"""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS protocolos (
-            {id_field},
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT NOT NULL UNIQUE,
             ativo INTEGER NOT NULL DEFAULT 1
         );
@@ -3183,13 +2675,12 @@ def admin_run_migrations():
     conn.commit()
 
     # Seed opcional de protocolos (só se estiver vazio)
-    result = conn.execute("SELECT COUNT(*) FROM protocolos;").fetchone()
-    # Handle both SQLite (tuple) and PostgreSQL (dict-like) results
-    qtd = result[0] if isinstance(result, tuple) else list(result.values())[0]
+    qtd = first_col(conn.execute("SELECT COUNT(*) FROM protocolos;").fetchone(), 0)
     if qtd == 0:
-        conn.executemany(fix_sql_placeholders(conn,
-            "INSERT INTO protocolos (nome, ativo) VALUES (?,1);"
-        ), [("Interior Básico",), ("Exterior Completo",), ("Desinfeção",)])
+        conn.executemany(
+            "INSERT INTO protocolos (nome, ativo) VALUES (?,1);",
+            [("Interior Básico",), ("Exterior Completo",), ("Desinfeção",)]
+        )
         conn.commit()
         done.append("Protocolos base inseridos")
 
@@ -3207,59 +2698,56 @@ def solicitar_autorizacao(viatura_id):
     funcionario_id = session.get("user_id")
     conn = get_conn()
     cur = conn.cursor()
+    ph = sql_placeholder(conn)
 
-    # Obter região e número de frota da viatura
-    sql = "SELECT regiao, num_frota FROM viaturas WHERE id=?"
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (viatura_id,))
+    # Obter região, descrição e número de frota da viatura
+    cur.execute("SELECT regiao, descricao, num_frota FROM viaturas WHERE id=?", (viatura_id,))
     row = cur.fetchone()
     regiao = (row["regiao"] or "").strip() if row and row["regiao"] else None
+    v_desc = (row["descricao"] or "").strip() if row and row["descricao"] else ""
     num_frota = row["num_frota"] if row else None
 
+    # Enforce de acesso: operador pode solicitar autorização apenas nas viaturas permitidas
+    if session.get("role") == "operador":
+        cur.execute("SELECT regiao, descricao_viaturas FROM funcionarios WHERE id=?", (funcionario_id,))
+        prof = cur.fetchone()
+        prof_regiao = (prof["regiao"] or "").strip() if prof and prof["regiao"] else None
+        if prof_regiao:
+            if regiao != prof_regiao:
+                flash("Sem permissão para solicitar autorização nesta viatura.", "danger")
+                conn.close()
+                return redirect(url_for("novo_registo"))
+        else:
+            prof_desc = (prof["descricao_viaturas"] or "").strip() if prof and prof["descricao_viaturas"] else ""
+            prof_desc_list = parse_descricao_viaturas(prof_desc)
+            if prof_desc_list and v_desc not in prof_desc_list:
+                flash("Sem permissão para solicitar autorização nesta viatura.", "danger")
+                conn.close()
+                return redirect(url_for("novo_registo"))
+
     destinatario_id = None
-    
-    # Primeiro tenta encontrar gestor na mesma região
     if regiao:
-        sql = "SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1 AND regiao=?"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql, (regiao,))
+        cur.execute("SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1 AND regiao=?", (regiao,))
         gestor = cur.fetchone()
         if gestor:
             destinatario_id = gestor["id"]
-    
-    # Se não encontrou gestor na região, procura qualquer gestor ativo
-    if not destinatario_id:
-        sql = "SELECT id FROM funcionarios WHERE role='gestor' AND ativo=1"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql)
-        gestor = cur.fetchone()
-        if gestor:
-            destinatario_id = gestor["id"]
-    
-    # Se ainda não encontrou, tenta administradores
-    if not destinatario_id:
-        sql = "SELECT id FROM funcionarios WHERE role='admin' AND ativo=1"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql)
-        admin = cur.fetchone()
-        if admin:
-            destinatario_id = admin["id"]
 
     if not destinatario_id:
-        flash("Não foi possível identificar um gestor ou administrador para autorizar esta solicitação. Contacte o administrador do sistema.", "danger")
+        flash("Não foi possível identificar o gestor destinatário para esta viatura.", "danger")
         conn.close()
         return redirect(url_for("novo_registo"))
 
     # Verifica se já existe pedido pendente hoje
-    today_condition = sql_today_condition(conn, "data_pedido")
-    cur.execute(fix_sql_placeholders(conn, f"""
+    hoje_sql, hoje_val = sql_date_eq_today("data_pedido", conn)
+    cur.execute(f"""
         SELECT 1 FROM pedidos_autorizacao
-        WHERE viatura_id=? AND funcionario_id=? AND {today_condition} AND validado=0
-    """), (viatura_id, funcionario_id))
+        WHERE viatura_id={ph} AND funcionario_id={ph} AND {hoje_sql} AND validado=0
+    """, (viatura_id, funcionario_id, hoje_val))
     if not cur.fetchone():
-        cur.execute(fix_sql_placeholders(conn,
-            "INSERT INTO pedidos_autorizacao (viatura_id, num_frota, funcionario_id, destinatario_id) VALUES (?,?,?,?)"
-        ), (viatura_id, num_frota, funcionario_id, destinatario_id))
+        cur.execute(
+            "INSERT INTO pedidos_autorizacao (viatura_id, num_frota, funcionario_id, destinatario_id) VALUES (?,?,?,?)",
+            (viatura_id, num_frota, funcionario_id, destinatario_id)
+        )
         conn.commit()
         flash("Pedido de autorização enviado ao gestor da região.", "info")
     else:
@@ -3281,12 +2769,14 @@ def novo_registo():
     user_id = session.get("user_id")
     user_role = session.get("role")
     regiao_operador = None
+    desc_list_operador: list[str] = []
     if user_role in ("operador", "gestor"):
-        sql = "SELECT regiao FROM funcionarios WHERE id=?"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql, (user_id,))
+        cur.execute("SELECT regiao, descricao_viaturas FROM funcionarios WHERE id=?", (user_id,))
         row = cur.fetchone()
         regiao_operador = (row["regiao"] or "").strip() if row and row["regiao"] else None
+        if user_role == "operador" and not regiao_operador:
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            desc_list_operador = parse_descricao_viaturas(descricao_user)
 
     # GET: mostra o formulário
     if request.method == "GET":
@@ -3296,26 +2786,26 @@ def novo_registo():
         if regiao_operador:
             viaturas_sql += " AND regiao = ?"
             viaturas_params.append(regiao_operador)
+        elif desc_list_operador:
+            placeholders = ",".join(["?"] * len(desc_list_operador))
+            viaturas_sql += f" AND COALESCE(descricao,'') IN ({placeholders})"
+            viaturas_params.extend(desc_list_operador)
         viaturas_sql += " ORDER BY matricula"
-        
-        # Fix parameter placeholders for PostgreSQL
-        viaturas_sql = fix_sql_placeholders(conn, viaturas_sql)
         cur.execute(viaturas_sql, viaturas_params)
         vs = [dict(row) for row in cur.fetchall()]
 
         cur.execute("SELECT id, nome, passos_json, frequencia_dias FROM protocolos WHERE ativo=1 ORDER BY nome")
         ps = [dict(row) for row in cur.fetchall()]
-        today_condition_limpeza = sql_today_condition(conn, "data_hora")
-        cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
+        hoje_val = today_pt_iso()
+        cur.execute("SELECT DISTINCT viatura_id FROM registos_limpeza WHERE date(data_hora) = ?", (hoje_val,))
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
-        cur.execute(fix_sql_placeholders(conn, "SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1"))
+        cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
         gestores = [dict(row) for row in cur.fetchall()]
         # Viaturas autorizadas a limpeza extra hoje
-        today_condition_pedido = sql_today_condition(conn, "data_pedido")
-        cur.execute(f"""
+        cur.execute("""
             SELECT viatura_id FROM pedidos_autorizacao
-            WHERE validado=1 AND {today_condition_pedido}
-        """)
+            WHERE validado=1 AND date(data_pedido)=?
+        """, (hoje_val,))
         viaturas_autorizadas = {r["viatura_id"] for r in cur.fetchall()}
         conn.close()
         limpa_hoje_map = {v["id"]: (v["id"] in limpas_hoje) for v in vs}
@@ -3335,44 +2825,54 @@ def novo_registo():
     estado = request.form.get("estado", "concluido")
     observacoes = (request.form.get("observacoes") or "").strip()
     local = (request.form.get("local") or "").strip()
-    hora_inicio = datetime.now().strftime("%H:%M")
+    hora_inicio = now_pt().strftime("%H:%M")
     funcionario_id = session.get("user_id")
+    hoje_val = today_pt_iso()
 
     if not (viatura_id and protocolo_id):
         flash("Selecione viatura e protocolo.", "danger")
         conn.close()
         return redirect(url_for("novo_registo"))
+
+    # Enforce de acesso: operador pode criar registos apenas nas viaturas permitidas
+    if user_role == "operador":
+        cur.execute("SELECT regiao, descricao FROM viaturas WHERE id=?", (viatura_id,))
+        vrow = cur.fetchone()
+        if not vrow:
+            flash("Viatura não encontrada.", "danger")
+            conn.close()
+            return redirect(url_for("novo_registo"))
+        v_regiao = (vrow["regiao"] or "").strip()
+        v_desc = (vrow["descricao"] or "").strip()
+        if regiao_operador:
+            if v_regiao != regiao_operador:
+                flash("Sem permissão para esta viatura.", "danger")
+                conn.close()
+                return redirect(url_for("novo_registo"))
+        elif desc_list_operador:
+            if v_desc not in desc_list_operador:
+                flash("Sem permissão para esta viatura.", "danger")
+                conn.close()
+                return redirect(url_for("novo_registo"))
     
     # Verifica se já foi limpa hoje
-    today_condition = sql_today_condition(conn, "data_hora")
-    sql = f"""
+    cur.execute("""
         SELECT COUNT(*) FROM registos_limpeza
-        WHERE viatura_id = ? AND {today_condition}
-    """
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (viatura_id,))
-    result = cur.fetchone()
-    # Handle both SQLite (tuple) and PostgreSQL (dict-like) results
-    if result is None:
-        count_value = 0
-    elif hasattr(result, 'keys'):  # PostgreSQL dict-like result
-        count_value = list(result.values())[0]
-    else:  # SQLite tuple result
-        count_value = result[0]
-    ja_limpo_hoje = count_value > 0
+        WHERE viatura_id = ? AND date(data_hora) = ?
+    """, (viatura_id, hoje_val))
+    ja_limpo_hoje = first_col(cur.fetchone(), 0) > 0
 
     pedido_autorizado = pedido_autorizado_hoje(viatura_id, funcionario_id)
     extra_autorizada = 1 if pedido_autorizado else 0
     responsavel_autorizacao = None
     if pedido_autorizado:
-        today_condition = sql_today_condition(conn, "pa.data_pedido")
-        cur.execute(fix_sql_placeholders(conn, f"""
+        cur.execute("""
             SELECT f.nome
             FROM pedidos_autorizacao pa
             JOIN funcionarios f ON f.id = pa.destinatario_id
-            WHERE pa.viatura_id=? AND pa.funcionario_id=? AND pa.validado=1 AND {today_condition}
+            WHERE pa.viatura_id=? AND pa.funcionario_id=? AND pa.validado=1 AND date(pa.data_pedido)=?
             ORDER BY pa.data_pedido DESC LIMIT 1
-        """), (viatura_id, funcionario_id))
+        """, (viatura_id, funcionario_id, hoje_val))
         row = cur.fetchone()
         responsavel_autorizacao = row["nome"] if row else None
 
@@ -3388,20 +2888,28 @@ def novo_registo():
     # Se já foi limpa hoje e não tem autorização, pede autorização
     if ja_limpo_hoje and not pedido_autorizado:
         flash("Viatura já efetuou limpeza hoje, solicite autorização para limpeza extra.", "warning")
-        cur.execute("SELECT id, matricula, descricao, num_frota FROM viaturas WHERE ativo=1 ORDER BY matricula")
+        viaturas_sql = "SELECT id, matricula, descricao, num_frota FROM viaturas WHERE ativo=1"
+        viaturas_params = []
+        if regiao_operador:
+            viaturas_sql += " AND regiao = ?"
+            viaturas_params.append(regiao_operador)
+        elif desc_list_operador:
+            placeholders = ",".join(["?"] * len(desc_list_operador))
+            viaturas_sql += f" AND COALESCE(descricao,'') IN ({placeholders})"
+            viaturas_params.extend(desc_list_operador)
+        viaturas_sql += " ORDER BY matricula"
+        cur.execute(viaturas_sql, viaturas_params)
         vs = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT id, nome FROM protocolos WHERE ativo=1 ORDER BY nome")
         ps = [dict(row) for row in cur.fetchall()]
-        today_condition_limpeza = sql_today_condition(conn, "data_hora")
-        cur.execute(f"SELECT DISTINCT viatura_id FROM registos_limpeza WHERE {today_condition_limpeza}")
+        cur.execute("SELECT DISTINCT viatura_id FROM registos_limpeza WHERE date(data_hora) = ?", (hoje_val,))
         limpas_hoje = {r["viatura_id"] for r in cur.fetchall()}
-        cur.execute(fix_sql_placeholders(conn, "SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1"))
+        cur.execute("SELECT id, nome FROM funcionarios WHERE role='gestor' AND ativo=1")
         gestores = [dict(row) for row in cur.fetchall()]
-        today_condition_pedido = sql_today_condition(conn, "data_pedido")
-        cur.execute(f"""
+        cur.execute("""
             SELECT viatura_id FROM pedidos_autorizacao
-            WHERE validado=1 AND {today_condition_pedido}
-        """)
+            WHERE validado=1 AND date(data_pedido)=?
+        """, (hoje_val,))
         viaturas_autorizadas = {r["viatura_id"] for r in cur.fetchall()}
         conn.close()
         limpa_hoje_map = {v["id"]: (v["id"] in limpas_hoje) for v in vs}
@@ -3419,22 +2927,18 @@ def novo_registo():
 
     # inserir registo
     # Obter a região atual da viatura
-    sql = "SELECT regiao FROM viaturas WHERE id=?"
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (viatura_id,))
+    cur.execute("SELECT regiao FROM viaturas WHERE id=?", (viatura_id,))
     row = cur.fetchone()
     regiao_viatura = (row["regiao"] or "") if row else None
 
-    sql = """
+    cur.execute("""
         INSERT INTO registos_limpeza
         (viatura_id, protocolo_id, funcionario_id, data_hora, estado, observacoes,
         local, hora_inicio, hora_fim, extra_autorizada, responsavel_autorizacao, regiao)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (
+    """, (
         viatura_id, protocolo_id, funcionario_id,
-        datetime.now().isoformat(timespec="seconds"),
+        now_pt_iso(),
         estado, observacoes, (local or None),
         (hora_inicio or None), None,
         extra_autorizada, responsavel_autorizacao,
@@ -3443,18 +2947,18 @@ def novo_registo():
 
     registo_id = cur.lastrowid
     # Preencher tipo_protocolo na viatura
-    cur.execute(fix_sql_placeholders(conn, """
+    cur.execute("""
         UPDATE viaturas
         SET tipo_protocolo = (
             SELECT nome FROM protocolos WHERE id = ?
         )
         WHERE id = ?
-    """), (protocolo_id, viatura_id))
+    """, (protocolo_id, viatura_id))
 
     # anexos
     files = request.files.getlist("ficheiros")
     if files:
-        day_dir = UPLOAD_DIR / datetime.now().strftime("%Y-%m-%d")
+        day_dir = UPLOAD_DIR / now_pt().strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
         for f in files:
             if not f or f.filename == "": continue
@@ -3466,16 +2970,16 @@ def novo_registo():
             while path.exists():
                 path = day_dir / f"{stem}_{i}{suf}"; i += 1
             f.save(path)
-            cur.execute(fix_sql_placeholders(conn,
-                "INSERT INTO anexos (registo_id, caminho, tipo) VALUES (?, ?, ?)"
-            ), (registo_id, str(path.relative_to(BASE_DIR)), "foto" if suf.lower() != ".pdf" else "pdf"))
+            cur.execute(
+                "INSERT INTO anexos (registo_id, caminho, tipo) VALUES (?, ?, ?)",
+                (registo_id, str(path.relative_to(BASE_DIR)), "foto" if suf.lower() != ".pdf" else "pdf")
+            )
 
     if pedido_autorizado:
-        today_condition = sql_today_condition(conn, "data_pedido")
-        cur.execute(fix_sql_placeholders(conn, f"""
+        cur.execute("""
             DELETE FROM pedidos_autorizacao
-            WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
-        """), (viatura_id, funcionario_id))
+            WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND date(data_pedido)=?
+        """, (viatura_id, funcionario_id, hoje_val))
     conn.commit()
     conn.close()
     flash(f"Registo #{registo_id} criado com sucesso.", "info")
@@ -3484,13 +2988,10 @@ def novo_registo():
 def pedido_autorizado_hoje(viatura_id, funcionario_id):
     conn = get_conn()
     cur = conn.cursor()
-    today_condition = sql_today_condition(conn, "data_pedido")
-    sql = f"""
+    cur.execute("""
         SELECT 1 FROM pedidos_autorizacao
-         WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND {today_condition}
-    """
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (viatura_id, funcionario_id))
+         WHERE viatura_id=? AND funcionario_id=? AND validado=1 AND date(data_pedido)=?
+    """, (viatura_id, funcionario_id, today_pt_iso()))
     res = cur.fetchone()
     conn.close()
     return bool(res)
@@ -3501,7 +3002,7 @@ def pedido_autorizado_hoje(viatura_id, funcionario_id):
 def registos_em_progresso():
     conn = get_conn()
     cur = conn.cursor()
-    query = """
+    cur.execute("""
         SELECT r.id as registo_id, r.data_hora, v.matricula, v.num_frota,
                p.nome as protocolo, f.nome as funcionario, r.local, r.hora_inicio
         FROM registos_limpeza r
@@ -3509,9 +3010,8 @@ def registos_em_progresso():
         JOIN protocolos p ON p.id = r.protocolo_id
         JOIN funcionarios f ON f.id = r.funcionario_id
         WHERE r.estado='em_progresso' AND (r.hora_fim IS NULL OR r.hora_fim='')
-        ORDER BY datetime(r.data_hora) DESC, r.id DESC
-    """
-    cur.execute(fix_datetime_in_sql(conn, query))
+        ORDER BY r.data_hora DESC, r.id DESC
+    """)
     registos = [dict(row) for row in cur.fetchall()]
     conn.close()
     return render_template("registos_em_progresso.html", registos=registos, signature=APP_SIGNATURE)
@@ -3520,14 +3020,14 @@ def registos_em_progresso():
 @login_required
 @require_perm("registos:edit")
 def finalizar_registo(registo_id):
-    hora_fim = datetime.now().strftime("%H:%M")
+    hora_fim = now_pt().strftime("%H:%M")
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(fix_sql_placeholders(conn, """
+    cur.execute("""
         UPDATE registos_limpeza
         SET hora_fim=?, estado='concluido'
         WHERE id=?
-    """), (hora_fim, registo_id))
+    """, (hora_fim, registo_id))
     conn.commit()
     conn.close()
     flash("Registo finalizado.", "success")
@@ -3539,9 +3039,7 @@ def finalizar_registo(registo_id):
 def validar_limpeza(viatura_id):
     conn = get_conn()
     cur = conn.cursor()
-    sql = "UPDATE viaturas SET limpeza_validada=1 WHERE id=?"
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (viatura_id,))
+    cur.execute("UPDATE viaturas SET limpeza_validada=1 WHERE id=?", (viatura_id,))
     conn.commit()
     conn.close()
     flash("Limpeza extra autorizada! Operador notificado.", "success")
@@ -3554,7 +3052,7 @@ def registo_apagar(rid: int):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute(fix_sql_placeholders(conn, "DELETE FROM registos_limpeza WHERE id=?"), (rid,))
+        cur.execute("DELETE FROM registos_limpeza WHERE id=?", (rid,))
         conn.commit()
         conn.close()
         flash("Registo eliminado.", "success")
@@ -3573,7 +3071,7 @@ def registo_apagar(rid: int):
 def ver_anexos(registo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(fix_sql_placeholders(conn, "SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id"), (registo_id,))
+    cur.execute("SELECT id, caminho, tipo FROM anexos WHERE registo_id=? ORDER BY id", (registo_id,))
     anex = [dict(r) for r in cur.fetchall()]
     conn.close()
     return render_template("anexos.html", registo_id=registo_id, anexos=anex, signature=APP_SIGNATURE)
@@ -3584,7 +3082,7 @@ def ver_anexos(registo_id: int):
 def download_anexo(anexo_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(fix_sql_placeholders(conn, "SELECT caminho FROM anexos WHERE id=?"), (anexo_id,))
+    cur.execute("SELECT caminho FROM anexos WHERE id=?", (anexo_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -3597,176 +3095,72 @@ def download_anexo(anexo_id: int):
 @app.route("/exportar_contabilidade_excel")
 @login_required
 def exportar_contabilidade_excel():
-    try:
-        from pandas_config import PANDAS_AVAILABLE, pd
-        
-        if not PANDAS_AVAILABLE:
-            print("DEBUG: Pandas não está disponível")
-            flash("Funcionalidade Excel não está disponível no momento.", "error")
-            return redirect(url_for("contabilidade"))
-            
-        print("DEBUG: Iniciando exportação contabilidade Excel")
-        
-        mes = request.args.get("mes")
-        protocolo_id = request.args.get("protocolo_id")
-        regiao = request.args.get("regiao")
-        empresa = request.args.get("empresa")
+    import pandas as pd
+    mes = request.args.get("mes")
+    protocolo_id = request.args.get("protocolo_id")
+    regiao = request.args.get("regiao")
+    empresa = request.args.get("empresa")
 
-        print(f"DEBUG: Parâmetros - mes: {mes}, protocolo_id: {protocolo_id}, regiao: {regiao}, empresa: {empresa}")
-
-        # Só admin pode exportar todas as regiões
-        user_id = session.get("user_id")
-        user_role = session.get("role")
-        regiao_user = None
-        if user_role in ("gestor",):
-            conn = get_conn()
-            cur = conn.cursor()
-            placeholder = sql_placeholder(conn)
-            cur.execute(f"SELECT regiao FROM funcionarios WHERE id={placeholder}", (user_id,))
-            row = cur.fetchone()
-            regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
-            conn.close()
-            regiao = regiao_user  # força filtro pela região do gestor
-            print(f"DEBUG: Gestor região limitada a: {regiao}")
-
+    # Só admin pode exportar todas as regiões
+    user_id = session.get("user_id")
+    user_role = session.get("role")
+    regiao_user = None
+    if user_role in ("gestor",):
         conn = get_conn()
         cur = conn.cursor()
-        
-        # Check database type for debugging
-        is_pg = is_postgres(conn)
-        print(f"DEBUG: Using PostgreSQL: {is_pg}")
-        
-        date_sql = sql_date(conn, "r.data_hora") 
-        placeholder = sql_placeholder(conn)
-        
-        # Build query with fallbacks for potentially missing columns
-        sql = f"""
-            SELECT 
-                {date_sql} as data, 
-                v.matricula, 
-                COALESCE(v.num_frota, '') as num_frota, 
-                COALESCE(v.regiao, '') as regiao, 
-                p.nome as protocolo, 
-                COALESCE(p.custo_limpeza, 0.0) as custo_limpeza, 
-                f.nome as funcionario, 
-                COALESCE(f.empresa, '') as empresa, 
-                COALESCE(r.local, '') as local
-            FROM registos_limpeza r
-            JOIN viaturas v ON v.id = r.viatura_id
-            JOIN protocolos p ON p.id = r.protocolo_id
-            JOIN funcionarios f ON f.id = r.funcionario_id
-            WHERE 1=1
-        """
-        params = []
-        
-        if mes:
-            month_format = sql_month_format(conn, "r.data_hora")
-            sql += f" AND {month_format} = ?"
-            params.append(mes)
-            
-        if protocolo_id:
-            sql += " AND p.id = ?"
-            params.append(protocolo_id)
-            
-        if regiao:
-            sql += " AND v.regiao = ?"
-            params.append(regiao)
-            
-        if empresa:
-            sql += " AND f.empresa = ?"
-            params.append(empresa) 
-
-        # Use sql_date helper for cross-database compatibility
-        order_date_sql = sql_date(conn, "r.data_hora")
-        sql += f" ORDER BY v.regiao ASC, {order_date_sql} ASC, r.id ASC"
-        
-        # Fix SQL placeholders for the database type before using with pandas
-        sql = fix_sql_placeholders(conn, sql)
-        
-        print(f"DEBUG: SQL query for contabilidade export: {sql}")
-        print(f"DEBUG: Parameters: {params}")
-        
-        # Execute query manually to avoid pandas/psycopg2 compatibility issues
-        try:
-            cur = conn.cursor()
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
-            print(f"DEBUG: Manual query returned {len(rows)} rows")
-            
-            if rows:
-                print(f"DEBUG: First row data: {dict(rows[0])}")
-                # Convert rows to list of dictionaries
-                data_rows = [dict(row) for row in rows]
-                df = pd.DataFrame(data_rows)
-            else:
-                print("DEBUG: Query returned no rows - checking if tables have data...")
-                # Check if tables have any data
-                cur.execute("SELECT COUNT(*) as count FROM registos_limpeza")
-                registos_count = cur.fetchone()["count"]
-                cur.execute("SELECT COUNT(*) as count FROM viaturas")
-                viaturas_count = cur.fetchone()["count"] 
-                cur.execute("SELECT COUNT(*) as count FROM protocolos")
-                protocolos_count = cur.fetchone()["count"]
-                cur.execute("SELECT COUNT(*) as count FROM funcionarios")
-                funcionarios_count = cur.fetchone()["count"]
-                print(f"DEBUG: Table counts - registos: {registos_count}, viaturas: {viaturas_count}, protocolos: {protocolos_count}, funcionarios: {funcionarios_count}")
-                
-                # Create empty DataFrame with correct column structure
-                df = pd.DataFrame(columns=[
-                    'data', 'matricula', 'num_frota', 'regiao', 'protocolo', 
-                    'custo_limpeza', 'funcionario', 'empresa', 'local'
-                ])
-                
-        except Exception as manual_e:
-            print(f"DEBUG: Manual query failed: {manual_e}")
-            conn.close()
-            raise manual_e
-        print(f"DEBUG: DataFrame shape: {df.shape}")
-        if not df.empty:
-            print(f"DEBUG: DataFrame columns: {list(df.columns)}")
-            print(f"DEBUG: First few rows:\n{df.head()}")
+        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
+        row = cur.fetchone()
+        regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
         conn.close()
+        regiao = regiao_user  # força filtro pela região do gestor
 
-        # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
-        if not df.empty:
-            print("DEBUG: Processando DataFrame...")
-            df = df.sort_values(["regiao", "data"])
-            df["id_regiao"] = (
-                df.groupby("regiao").cumcount() + 1
-            ).apply(lambda x: f"{x:03d}")
-            df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
-            # Ordena para exportar do mais recente para o mais antigo
-            df = df.sort_values(["data"], ascending=[False])
-            print("DEBUG: DataFrame processado com sucesso")
-            
-            cols = [
-                "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
-                "custo_limpeza", "funcionario", "empresa", "local"
-            ]
-            df = df[cols]
-        else:
-            print("DEBUG: DataFrame vazio - criando DataFrame com colunas vazias")
-            # Criar DataFrame vazio com as colunas corretas
-            cols = [
-                "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
-                "custo_limpeza", "funcionario", "empresa", "local"
-            ]
-            df = pd.DataFrame(columns=cols)
+    conn = get_conn()
+    cur = conn.cursor()
+    sql = """
+        SELECT date(r.data_hora) as data, v.matricula, v.num_frota, v.regiao, p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
+        FROM registos_limpeza r
+        JOIN viaturas v ON v.id = r.viatura_id
+        JOIN protocolos p ON p.id = r.protocolo_id
+        JOIN funcionarios f ON f.id = r.funcionario_id
+        WHERE 1=1
+    """
+    params = []
+    if mes:
+        sql += " AND substr(r.data_hora, 1, 7) = ?"
+        params.append(mes)
+    if protocolo_id:
+        sql += " AND p.id = ?"
+        params.append(protocolo_id)
+    if regiao:
+        sql += " AND v.regiao = ?"
+        params.append(regiao)
+    if empresa:
+        sql += " AND f.empresa = ?"
+        params.append(empresa) 
 
-        print("DEBUG: Criando arquivo Excel...")
-        fname = EXPORT_DIR / f"contabilidade_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        df.to_excel(fname, index=False, sheet_name="Contabilidade")
-        print(f"DEBUG: Arquivo criado: {fname}")
-        
-        return send_file(fname, as_attachment=True)
-        
-    except Exception as e:
-        print(f"❌ ERRO na exportação contabilidade Excel: {str(e)}")
-        print(f"❌ Tipo do erro: {type(e).__name__}")
-        import traceback
-        print(f"❌ Traceback completo: {traceback.format_exc()}")
-        flash(f"Erro na exportação: {str(e)}", "error")
-        return redirect(url_for("contabilidade"))
+    sql += " ORDER BY v.regiao ASC, date(r.data_hora) ASC, r.id ASC"
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+
+    # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
+    if not df.empty:
+        df = df.sort_values(["regiao", "data"])
+        df["id_regiao"] = (
+            df.groupby("regiao").cumcount() + 1
+        ).apply(lambda x: f"{x:03d}")
+        df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
+        # Ordena para exportar do mais recente para o mais antigo
+        df = df.sort_values(["data"], ascending=[False])
+
+    cols = [
+        "id_regiao", "data", "matricula", "num_frota", "regiao", "protocolo",
+        "custo_limpeza", "funcionario", "empresa", "local"
+    ]
+    df = df[cols]
+
+    fname = EXPORT_DIR / f"contabilidade_{mes or 'todos'}_{now_pt().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    df.to_excel(fname, index=False, sheet_name="Contabilidade")
+    return send_file(fname, as_attachment=True)
 # -----------------------------------------------------------------------------
 # Administração (utilizadores, perfis, import de viaturas)
 # -----------------------------------------------------------------------------
@@ -3808,19 +3202,15 @@ def admin_user_toggle(user_id):
         flash("Não pode desativar a sua própria conta.", "warning")
         return redirect(url_for("admin_users"))
     conn = get_conn(); cur = conn.cursor()
-    cur.execute(fix_sql_placeholders(conn, "SELECT role, ativo FROM funcionarios WHERE id=?"), (user_id,))
+    cur.execute("SELECT role, ativo FROM funcionarios WHERE id=?", (user_id,))
     u = cur.fetchone()
     if not u:
         conn.close(); flash("Utilizador não encontrado.", "danger"); return redirect(url_for("admin_users"))
     if (u["role"] or "").lower() == "admin" and u["ativo"] == 1:
-        placeholder = sql_placeholder(conn)
-        cur.execute(f"SELECT COUNT(*) AS n FROM funcionarios WHERE LOWER(role)='admin' AND ativo=1 AND id<>{placeholder}", (user_id,))
+        cur.execute("SELECT COUNT(*) AS n FROM funcionarios WHERE LOWER(role)='admin' AND ativo=1 AND id<>?", (user_id,))
         if cur.fetchone()["n"] == 0:
             conn.close(); flash("Não pode desativar o último admin ativo.", "danger"); return redirect(url_for("admin_users"))
-    # Use the helper function to handle parameter placeholders correctly
-    sql = "UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?"
-    sql = fix_sql_placeholders(conn, sql)
-    cur.execute(sql, (user_id,))
+    cur.execute("UPDATE funcionarios SET ativo = CASE WHEN ativo=1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
     conn.commit(); conn.close()
     flash("Estado do utilizador atualizado.", "success")
     return redirect(url_for("admin_users"))
@@ -3830,7 +3220,7 @@ def admin_user_toggle(user_id):
 @require_perm("users:manage")
 def admin_user_reset_password(user_id):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute(fix_sql_placeholders(conn, "SELECT id, username, nome FROM funcionarios WHERE id=?"), (user_id,))
+    cur.execute("SELECT id, username, nome FROM funcionarios WHERE id=?", (user_id,))
     user = cur.fetchone()
     if not user:
         conn.close()
@@ -3841,10 +3231,7 @@ def admin_user_reset_password(user_id):
         if not new_password:
             flash("A nova password é obrigatória.", "danger")
         else:
-            # Use the helper function to handle parameter placeholders correctly
-            sql = "UPDATE funcionarios SET password=? WHERE id=?"
-            sql = fix_sql_placeholders(conn, sql)
-            cur.execute(sql, (generate_password_hash(new_password), user_id))
+            cur.execute("UPDATE funcionarios SET password=? WHERE id=?", (generate_password_hash(new_password), user_id))
             conn.commit()
             flash("Password redefinida com sucesso.", "success")
             conn.close()
@@ -3865,29 +3252,21 @@ def admin_user_new():
         ativo = 1 if request.form.get("ativo") == "1" else 0
         regiao = (request.form.get("regiao") or "").strip()
         empresa = (request.form.get("empresa") or "").strip() if role == "operador" else None
+        descricao_viaturas = (request.form.get("descricao_viaturas") or "").strip() if role == "operador" else None
         password = request.form.get("password") or ""
         if not username or not password:
             flash("Username e password são obrigatórios.", "danger")
             return redirect(url_for("admin_user_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
-            # Use the helper function to handle parameter placeholders correctly
-            sql = "INSERT INTO funcionarios (username, nome, role, ativo, regiao, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            sql = fix_sql_placeholders(conn, sql)
-            
             cur.execute(
-                sql,
-                (username, nome or username, role, ativo, regiao, generate_password_hash(password), email, empresa)
+                "INSERT INTO funcionarios (username, nome, role, ativo, regiao, descricao_viaturas, password, email, empresa) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (username, nome or username, role, ativo, regiao, descricao_viaturas, generate_password_hash(password), email, empresa)
             )
             conn.commit(); flash("Utilizador criado.", "success")
             return redirect(url_for("admin_users"))
-        except Exception as e:
-            # Handle both SQLite IntegrityError and PostgreSQL IntegrityError
-            error_msg = str(e).lower()
-            if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
-                flash("Username já existe.", "danger")
-            else:
-                flash(f"Erro ao criar utilizador: {str(e)}", "danger")
+        except sqlite3.IntegrityError:
+            flash("Username já existe.", "danger")
             return redirect(url_for("admin_user_new"))
         finally:
             conn.close()
@@ -3906,30 +3285,21 @@ def admin_user_edit(user_id):
         ativo = 1 if request.form.get("ativo") == "1" else 0
         regiao = (request.form.get("regiao") or "").strip()
         empresa = (request.form.get("empresa") or "").strip() if role == "operador" else None
+        descricao_viaturas = (request.form.get("descricao_viaturas") or "").strip() if role == "operador" else None
         if not username:
             flash("Username é obrigatório.", "danger"); conn.close()
             return redirect(url_for("admin_user_edit", user_id=user_id))
         try:
-            # Use the helper function to handle parameter placeholders correctly
-            sql = "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, email=?, empresa=? WHERE id=?"
-            sql = fix_sql_placeholders(conn, sql)
-            
             cur.execute(
-                sql,
-                (username, nome or username, role, ativo, regiao, email, empresa, user_id)
+                "UPDATE funcionarios SET username=?, nome=?, role=?, ativo=?, regiao=?, descricao_viaturas=?, email=?, empresa=? WHERE id=?",
+                (username, nome or username, role, ativo, regiao, descricao_viaturas, email, empresa, user_id)
             )
             conn.commit(); flash("Utilizador atualizado.", "info")
             return redirect(url_for("admin_users"))
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
-                flash("Username já existe.", "danger")
-            else:
-                flash(f"Erro ao atualizar utilizador: {str(e)}", "danger")
-            conn.close()
+        except sqlite3.IntegrityError:
+            flash("Username já existe.", "danger"); conn.close()
             return redirect(url_for("admin_user_edit", user_id=user_id))
-    placeholder = sql_placeholder(conn)
-    cur.execute(f"SELECT * FROM funcionarios WHERE id={placeholder}", (user_id,))
+    cur.execute("SELECT * FROM funcionarios WHERE id=?", (user_id,))
     u = cur.fetchone(); conn.close()
     if not u:
         flash("Utilizador não encontrado.", "danger")
@@ -3959,9 +3329,9 @@ def admin_role_new():
             flash("Nome do perfil obrigatório.", "danger"); return redirect(url_for("admin_role_new"))
         conn = get_conn(); cur = conn.cursor()
         try:
-            cur.execute(fix_sql_placeholders(conn, "INSERT INTO roles (name) VALUES (?)"), (name,))
+            cur.execute("INSERT INTO roles (name) VALUES (?)", (name,))
             role_id = cur.lastrowid
-            cur.executemany(fix_sql_placeholders(conn, "INSERT INTO role_permissions (role_id, perm) VALUES (?,?)"), [(role_id, p) for p in perms])
+            cur.executemany("INSERT INTO role_permissions (role_id, perm) VALUES (?,?)", [(role_id, p) for p in perms])
             conn.commit(); flash("Perfil criado.", "info")
             return redirect(url_for("admin_roles"))
         except sqlite3.IntegrityError:
@@ -3972,7 +3342,7 @@ def admin_role_new():
     return render_template("admin_role_form.html", perms=KNOWN_PERMS, signature=APP_SIGNATURE)
 
 # ...existing code...
-from pandas_config import PANDAS_AVAILABLE, pd
+import pandas as pd
 import io
 @app.route("/admin/alterar_regiao_viatura", methods=["GET", "POST"])
 @login_required
@@ -3986,7 +3356,7 @@ def admin_alterar_regiao_viatura():
         viatura_id = request.form.get("viatura_id")
         nova_regiao = request.form.get("nova_regiao", "").strip()
         if viatura_id and nova_regiao:
-            cur.execute(fix_sql_placeholders(conn, "UPDATE viaturas SET regiao=? WHERE id=?"), (nova_regiao, viatura_id))
+            cur.execute("UPDATE viaturas SET regiao=? WHERE id=?", (nova_regiao, viatura_id))
             conn.commit()
             flash("Região da viatura atualizada.", "success")
         else:
@@ -4025,9 +3395,6 @@ def admin_import_viaturas():
             flash("Ficheiro deve ser .csv ou .xlsx", "danger")
             return redirect(url_for("admin_import_viaturas"))
 
-        print(f"DEBUG: Fieldnames encontrados: {fieldnames}")
-        print(f"DEBUG: Primeira linha de dados: {rows[0] if rows else 'Nenhuma linha'}")
-
         required = {"matricula"}
         if not fieldnames or not required.issubset(set(fieldnames)):
             flash("Ficheiro precisa, no mínimo, da coluna 'matricula'.", "danger")
@@ -4035,60 +3402,31 @@ def admin_import_viaturas():
 
         conn = get_conn(); cur = conn.cursor()
         ins, upd = 0, 0
-        for i, row in enumerate(rows):
-            # Função helper para buscar valor por múltiplas variações de nome
-            def get_value(possible_names):
-                # Primeiro tenta nomes exactos
-                for name in possible_names:
-                    if name in row and row[name] is not None:
-                        val = _str(row[name])
-                        if val:  # Se não for string vazia
-                            return val
-                
-                # Depois tenta nomes com espaços removidos (caso hajam espaços extra)
-                for name in possible_names:
-                    for key in row.keys():
-                        if key.strip().lower() == name.strip().lower():
-                            if row[key] is not None:
-                                val = _str(row[key])
-                                if val:
-                                    return val
-                return None
-            
-            matricula = get_value(["matricula", "MATRICULA", "mat", "MAT", "Matricula", "Matrícula", "MATRÍCULA"])
+        for row in rows:
+            matricula = _str(row.get("matricula") or row.get("MATRICULA"))
             if not matricula: continue
-            
-            num_frota = get_value(["num_frota", "NUM_FROTA", "Num_Frota", "n_frota", "N_FROTA", "numero_frota", "NUMERO_FROTA", "Número da Frota", "Numero da Frota", "nº de frota", "Nº de Frota", "No de Frota"])
-            regiao = get_value(["regiao", "REGIAO", "Região", "REGIÃO", "Regiao", "region", "REGION", "região"])
-            operacao = get_value(["operacao", "OPERACAO", "Operação", "OPERAÇÃO", "Operacao", "operation", "OPERATION", "operação"])  
-            marca = get_value(["marca", "MARCA", "Marca", "brand", "BRAND"])
-            modelo = get_value(["modelo", "MODELO", "Modelo", "model", "MODEL"])
-            
-            if i == 0:  # Debug primeira linha
-                print(f"DEBUG: Primeira viatura processada:")
-                print(f"  matricula: '{matricula}'")
-                print(f"  num_frota: '{num_frota}'")
-                print(f"  regiao: '{regiao}'")
-                print(f"  operacao: '{operacao}'")
-                print(f"  marca: '{marca}'")
-                print(f"  modelo: '{modelo}'")
-            tipo_protocolo = get_value(["tipo_protocolo", "TIPO_PROTOCOLO", "Tipo_Protocolo", "Tipo de Protocolo", "TIPO DE PROTOCOLO", "protocolo", "PROTOCOLO"])
-            descricao = get_value(["descricao", "DESCRICAO", "Descrição", "DESCRIÇÃO", "Descricao", "description", "DESCRIPTION"])
-            filial = get_value(["filial", "FILIAL", "Filial", "branch", "BRANCH"])
-            ativo = row.get("ativo") or row.get("ATIVO") or row.get("Ativo") or row.get("ACTIVO") or row.get("activo")
+            num_frota = _str(row.get("num_frota") or row.get("NUM_FROTA"))
+            regiao = _str(row.get("regiao") or row.get("REGIAO"))
+            operacao = _str(row.get("operacao") or row.get("OPERACAO"))
+            marca = _str(row.get("marca") or row.get("MARCA"))
+            modelo = _str(row.get("modelo") or row.get("MODELO"))
+            tipo_protocolo = _str(row.get("tipo_protocolo") or row.get("TIPO_PROTOCOLO"))
+            descricao = _str(row.get("descricao") or row.get("DESCRICAO"))
+            filial = _str(row.get("filial") or row.get("FILIAL"))
+            ativo = row.get("ativo") or row.get("ATIVO")
             ativo = 1 if str(ativo).strip().lower() in {"1","true","sim","yes","y"} else 1  # default 1
 
-            cur.execute(fix_sql_placeholders(conn, "SELECT id FROM viaturas WHERE matricula=?"), (matricula,))
+            cur.execute("SELECT id FROM viaturas WHERE matricula=?", (matricula,))
             ex = cur.fetchone()
             if ex:
-                cur.execute(fix_sql_placeholders(conn, """UPDATE viaturas
+                cur.execute("""UPDATE viaturas
                                SET num_frota=?, regiao=?, operacao=?, marca=?, modelo=?, tipo_protocolo=?, descricao=?, filial=?, ativo=?
-                               WHERE id=?"""),
+                               WHERE id=?""",
                             (num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo, ex["id"]))
                 upd += 1
             else:
-                cur.execute(fix_sql_placeholders(conn, """INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
-                               VALUES (?,?,?,?,?,?,?,?,?,?)"""),
+                cur.execute("""INSERT INTO viaturas (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo)
+                               VALUES (?,?,?,?,?,?,?,?,?,?)""",
                             (matricula, num_frota, regiao, operacao, marca, modelo, tipo_protocolo, descricao, filial, ativo))
                 ins += 1
         conn.commit(); conn.close()
@@ -4108,7 +3446,7 @@ def admin_utilizadores_delete(user_id):
     if not session.get("is_admin"):
         return redirect(url_for("sem_permissao"))
     conn = get_conn()
-    conn.execute(fix_sql_placeholders(conn, "DELETE FROM utilizadores WHERE id = ?;"), (user_id,))
+    conn.execute("DELETE FROM utilizadores WHERE id = ?;", (user_id,))
     conn.commit()
     flash("Utilizador eliminado com sucesso.", "success")
     return redirect(url_for("admin_utilizadores"))
@@ -4128,7 +3466,7 @@ def admin_protocolos_new():
         flash("Indica um nome para o protocolo.", "warning")
         return redirect(url_for("admin_protocolos"))
     conn = get_conn()
-    conn.execute(fix_sql_placeholders(conn, "INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);"),
+    conn.execute("INSERT INTO protocolos (nome, conteudo, ativo) VALUES (?,?,1);",
                 (nome, conteudo))
     conn.commit()
     flash("Protocolo criado.", "success")
@@ -4142,7 +3480,7 @@ def admin_protocolos_edit(pid):
     conteudo = request.form.get("conteudo", "").strip()
     ativo = 1 if request.form.get("ativo") == "on" else 0
     conn = get_conn()
-    conn.execute(fix_sql_placeholders(conn, "UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;"),
+    conn.execute("UPDATE protocolos SET nome=?, conteudo=?, ativo=? WHERE id=?;",
                 (nome, conteudo, ativo, pid))
     conn.commit()
     flash("Protocolo atualizado.", "success")
@@ -4156,9 +3494,9 @@ def protocolo_apagar(pid: int):
     cur = conn.cursor()
     try:
         # Limpar referências ao protocolo nas viaturas
-        cur.execute(fix_sql_placeholders(conn, "UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)"), (pid,))
+        cur.execute("UPDATE viaturas SET tipo_protocolo=NULL WHERE tipo_protocolo IN (SELECT nome FROM protocolos WHERE id=?)", (pid,))
         # Apagar o protocolo
-        cur.execute(fix_sql_placeholders(conn, "DELETE FROM protocolos WHERE id=?"), (pid,))
+        cur.execute("DELETE FROM protocolos WHERE id=?", (pid,))
         conn.commit()
         conn.close()
         flash("Protocolo eliminado.", "success")
@@ -4190,9 +3528,7 @@ def contabilidade():
     if user_role == "gestor":
         conn = get_conn()
         cur = conn.cursor()
-        sql = "SELECT regiao FROM funcionarios WHERE id=?"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql, (user_id,))
+        cur.execute("SELECT regiao FROM funcionarios WHERE id=?", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
         conn.close()
@@ -4200,9 +3536,8 @@ def contabilidade():
 
     conn = get_conn()
     cur = conn.cursor()
-    date_sql = sql_date(conn, "r.data_hora")
-    sql = f"""
-        SELECT r.id as registo_id, {date_sql} as data, 
+    sql = """
+        SELECT r.id as registo_id, date(r.data_hora) as data, 
                COALESCE(r.regiao, v.regiao) as regiao, 
                v.matricula, v.num_frota,
                p.nome as protocolo, p.custo_limpeza, f.nome as funcionario, f.empresa, r.local
@@ -4214,8 +3549,7 @@ def contabilidade():
     """
     params = []
     if mes:
-        month_format = sql_month_format(conn, "r.data_hora")
-        sql += f" AND {month_format} = ?"
+        sql += " AND substr(r.data_hora, 1, 7) = ?"
         params.append(mes)
     if protocolo_id:
         sql += " AND p.id = ?"
@@ -4226,9 +3560,8 @@ def contabilidade():
     if empresa:
         sql += " AND f.empresa = ?"
         params.append(empresa)
-    datetime_order = sql_datetime(conn, "r.data_hora")
-    sql += f" ORDER BY regiao ASC, {datetime_order} ASC, r.id ASC"
-    cur.execute(fix_sql_placeholders(conn, sql), params)
+    sql += " ORDER BY regiao ASC, r.data_hora ASC, r.id ASC"
+    cur.execute(sql, params)
     registos = [dict(row) for row in cur.fetchall()]
 
     # Gerar id_regiao sequencial por região (do mais antigo para o mais recente)
@@ -4279,12 +3612,14 @@ def registos():
     user_id = session.get("user_id")
     user_role = session.get("role")
     regiao_user = None
+    desc_list_user: list[str] = []
     if user_role in ("operador", "gestor"):
-        sql = "SELECT regiao FROM funcionarios WHERE id=?"
-        sql = fix_sql_placeholders(conn, sql)
-        cur.execute(sql, (user_id,))
+        cur.execute("SELECT regiao, descricao_viaturas FROM funcionarios WHERE id=?", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
+        if user_role == "operador" and not regiao_user:
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            desc_list_user = parse_descricao_viaturas(descricao_user)
 
     sql = """
         SELECT r.id as registo_id, r.data_hora, r.hora_inicio, r.hora_fim, v.matricula, v.num_frota,
@@ -4298,19 +3633,16 @@ def registos():
     """
     params = []
     if mes:
-        # Use sql_month_format helper for cross-database compatibility
-        month_format = sql_month_format(conn, "r.data_hora")
-        sql += f" AND {month_format} = ?"
+        sql += " AND substr(r.data_hora, 1, 7) = ?"
         params.append(mes)
     if regiao_user:
         sql += " AND v.regiao = ?"
         params.append(regiao_user)
-    
-    datetime_order = sql_datetime(conn, "r.data_hora")
-    sql += f" ORDER BY v.regiao ASC, {datetime_order} ASC, r.id ASC"
-    
-    # Fix parameter placeholders for PostgreSQL
-    sql = fix_sql_placeholders(conn, sql)
+    elif user_role == "operador" and desc_list_user:
+        placeholders = ",".join(["?"] * len(desc_list_user))
+        sql += f" AND COALESCE(v.descricao,'') IN ({placeholders})"
+        params.extend(desc_list_user)
+    sql += " ORDER BY v.regiao ASC, r.data_hora ASC, r.id ASC"
     cur.execute(sql, params)
     registos = [dict(row) for row in cur.fetchall()]
     conn.close()
@@ -4334,11 +3666,7 @@ def registos():
 @login_required
 @require_perm("export:excel")
 def export_excel():
-    from pandas_config import PANDAS_AVAILABLE, pd
-    
-    if not PANDAS_AVAILABLE:
-        flash("Funcionalidade Excel não está disponível no momento.", "error")
-        return redirect(url_for("registos"))
+    import pandas as pd
     mes = request.args.get("mes")
     conn = get_conn()
     cur = conn.cursor()
@@ -4347,11 +3675,14 @@ def export_excel():
     user_id = session.get("user_id")
     user_role = session.get("role")
     regiao_user = None
+    desc_list_user: list[str] = []
     if user_role in ("operador", "gestor"):
-        ph = sql_placeholder(conn)
-        cur.execute(f"SELECT regiao FROM funcionarios WHERE id={ph}", (user_id,))
+        cur.execute("SELECT regiao, descricao_viaturas FROM funcionarios WHERE id=?", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
+        if user_role == "operador" and not regiao_user:
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            desc_list_user = parse_descricao_viaturas(descricao_user)
 
     sql = """
         SELECT
@@ -4377,48 +3708,18 @@ def export_excel():
         WHERE 1=1
     """
     params = []
-    ph = sql_placeholder(conn)
     if mes:
-        month_format = sql_month_format(conn, "r.data_hora")
-        sql += f" AND {month_format} = {ph}"
+        sql += " AND substr(r.data_hora, 1, 7) = ?"
         params.append(mes)
     if regiao_user and user_role != "admin":
-        sql += f" AND v.regiao = {ph}"
+        sql += " AND v.regiao = ?"
         params.append(regiao_user)
-    
-    datetime_order = sql_datetime(conn, "r.data_hora")
-    sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
-    
-    # Execute query manually to avoid pandas/psycopg2 compatibility issues
-    print(f"DEBUG: Export excel SQL: {sql}")
-    print(f"DEBUG: Export excel params: {params}")
-    
-    try:
-        cur = conn.cursor()
-        cur.execute(sql, tuple(params))
-        rows = cur.fetchall()
-        print(f"DEBUG: Export excel manual query returned {len(rows)} rows")
-        
-        if rows:
-            print(f"DEBUG: First export excel row: {dict(rows[0])}")
-            # Convert rows to list of dictionaries
-            data_rows = [dict(row) for row in rows]
-            df = pd.DataFrame(data_rows)
-        else:
-            print("DEBUG: Export excel query returned no rows")
-            # Create empty DataFrame with correct structure
-            df = pd.DataFrame(columns=[
-                "id_regiao", "data_hora", "matricula", "num_frota", "protocolo",
-                "funcionario", "local", "estado", "observacoes", "hora_inicio", 
-                "hora_fim", "extra_autorizada", "verificacao_limpeza", 
-                "comentarios_verificacao", "regiao"
-            ])
-            
-    except Exception as manual_e:
-        print(f"DEBUG: Export excel manual query failed: {manual_e}")
-        conn.close()
-        raise manual_e
-    
+    elif user_role == "operador" and desc_list_user:
+        placeholders = ",".join(["?"] * len(desc_list_user))
+        sql += f" AND COALESCE(v.descricao,'') IN ({placeholders})"
+        params.extend(desc_list_user)
+    sql += " ORDER BY r.data_hora DESC, r.id DESC"
+    df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
      
     if not df.empty:
@@ -4460,7 +3761,7 @@ def export_excel():
         ]
         df = df[cols]
 
-    fname = EXPORT_DIR / f"registos_limpeza_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    fname = EXPORT_DIR / f"registos_limpeza_{mes or 'todos'}_{now_pt().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     # Sheet principal: registos
     # Sheet secundária: protocolos
@@ -4494,11 +3795,7 @@ def export_excel():
 @login_required
 @require_perm("export:excel")
 def export_registos_excel():
-    from pandas_config import PANDAS_AVAILABLE, pd
-    
-    if not PANDAS_AVAILABLE:
-        flash("Funcionalidade Excel não está disponível no momento.", "error")
-        return redirect(url_for("registos"))
+    import pandas as pd
     mes = request.args.get("mes")
     conn = get_conn()
     cur = conn.cursor()
@@ -4507,11 +3804,14 @@ def export_registos_excel():
     user_id = session.get("user_id")
     user_role = session.get("role")
     regiao_user = None
+    desc_list_user: list[str] = []
     if user_role in ("operador", "gestor"):
-        ph = sql_placeholder(conn)
-        cur.execute(fix_sql_placeholders(conn, f"SELECT regiao FROM funcionarios WHERE id={ph}"), (user_id,))
+        cur.execute("SELECT regiao, descricao_viaturas FROM funcionarios WHERE id=?", (user_id,))
         row = cur.fetchone()
         regiao_user = (row["regiao"] or "").strip() if row and row["regiao"] else None
+        if user_role == "operador" and not regiao_user:
+            descricao_user = (row["descricao_viaturas"] or "").strip() if row and row["descricao_viaturas"] else ""
+            desc_list_user = parse_descricao_viaturas(descricao_user)
 
     sql = """
         SELECT
@@ -4537,53 +3837,18 @@ def export_registos_excel():
         WHERE 1=1
     """
     params = []
-    ph = sql_placeholder(conn)
     if mes:
-        month_format = sql_month_format(conn, "r.data_hora")
-        sql += f" AND {month_format} = {ph}"
+        sql += " AND substr(r.data_hora, 1, 7) = ?"
         params.append(mes)
     if regiao_user and user_role != "admin":
-        sql += f" AND v.regiao = {ph}"
+        sql += " AND v.regiao = ?"
         params.append(regiao_user)
-    datetime_order = sql_datetime(conn, "r.data_hora")
-    sql += f" ORDER BY {datetime_order} DESC, r.id DESC"
-    
-    # Debug the query
-    print(f"DEBUG: Export registos SQL: {sql}")
-    print(f"DEBUG: Export registos params: {params}")
-    final_sql = fix_sql_placeholders(conn, sql)
-    print(f"DEBUG: Final SQL after placeholders: {final_sql}")
-    
-    # Execute query manually to avoid pandas/psycopg2 compatibility issues
-    try:
-        cur = conn.cursor()
-        cur.execute(final_sql, tuple(params))
-        rows = cur.fetchall()
-        print(f"DEBUG: Manual export query returned {len(rows)} rows")
-        
-        if rows:
-            print(f"DEBUG: First export row: {dict(rows[0])}")
-            # Convert rows to list of dictionaries
-            data_rows = [dict(row) for row in rows]
-            df = pd.DataFrame(data_rows)
-        else:
-            print("DEBUG: Export query returned no rows")
-            # Create empty DataFrame with correct structure
-            df = pd.DataFrame(columns=[
-                "id_regiao", "data_hora", "matricula", "num_frota", "protocolo",
-                "funcionario", "local", "estado", "observacoes", "hora_inicio", 
-                "hora_fim", "extra_autorizada", "verificacao_limpeza", 
-                "comentarios_verificacao", "regiao"
-            ])
-            
-    except Exception as manual_e:
-        print(f"DEBUG: Manual export query failed: {manual_e}")
-        conn.close()
-        raise manual_e
-    print(f"DEBUG: DataFrame shape after pandas: {df.shape}")
-    if not df.empty:
-        print(f"DEBUG: DataFrame columns: {list(df.columns)}")
-        print(f"DEBUG: First DataFrame row:\n{df.head(1)}")
+    elif user_role == "operador" and desc_list_user:
+        placeholders = ",".join(["?"] * len(desc_list_user))
+        sql += f" AND COALESCE(v.descricao,'') IN ({placeholders})"
+        params.extend(desc_list_user)
+    sql += " ORDER BY r.data_hora DESC, r.id DESC"
+    df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
 
     if not df.empty:
@@ -4596,12 +3861,7 @@ def export_registos_excel():
         df["id_regiao"] = df["regiao"].fillna("—") + "-" + df["id_regiao"]
         # Agora ordena para exportar do mais recente para o mais antigo
         df = df.sort_values(["data_hora", "id_regiao"], ascending=[False, False])
-        # Handle datetime conversion more robustly for PostgreSQL compatibility
-        try:
-            df["data"] = pd.to_datetime(df["data_hora"], errors='coerce').dt.date
-        except Exception as e:
-            # Fallback: try to extract date from string format
-            df["data"] = df["data_hora"].apply(lambda x: str(x).split('T')[0] if x else None)
+        df["data"] = pd.to_datetime(df["data_hora"]).dt.date
 
         # Calcular tempo de limpeza (em minutos)
         def calc_dur(row):
@@ -4626,7 +3886,7 @@ def export_registos_excel():
         ]
         df = df[cols]
 
-    fname = EXPORT_DIR / f"registos_limpeza_{mes or 'todos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    fname = EXPORT_DIR / f"registos_limpeza_{mes or 'todos'}_{now_pt().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     # Sheet principal: registos
     # Sheet secundária: protocolos
@@ -4655,68 +3915,6 @@ def export_registos_excel():
         df_protocolos.to_excel(writer, index=False, sheet_name="Protocolos")
 
     return send_file(fname, as_attachment=True)
-# -----------------------------------------------------------------------------
-# Arrancar
-# -----------------------------------------------------------------------------
-
-# Flag para evitar múltiplas inicializações
-_schema_initialized = False
-
-# Try to initialize schema early (but don't fail if it doesn't work)
-def initialize_schema_early():
-    global _schema_initialized
-    if not _schema_initialized:
-        try:
-            print("DEBUG: Tentando inicialização precoce do schema...")
-            ensure_schema_on_boot()
-            _schema_initialized = True
-            print("DEBUG: Inicialização precoce do schema bem-sucedida!")
-        except Exception as e:
-            print(f"DEBUG: Inicialização precoce falhou (será tentada no primeiro request): {e}")
-
-# Initialize schema early when not in production or when safe to do so
 if __name__ == "__main__":
-    initialize_schema_early()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-else:
-    # When running under gunicorn, try early initialization but don't block startup
-    try:
-        initialize_schema_early()
-    except Exception as e:
-        print(f"DEBUG: Inicialização precoce sob gunicorn falhou: {e}")
-# ---- Extensões de esquema (idempotentes) ----
-
-# Health check endpoint para Render (não requer autenticação)
-@app.route('/health')
-def health_check():
-    return {'status': 'ok', 'schema_initialized': _schema_initialized}, 200
-
-@app.before_request
-def ensure_database_ready():
-    global _schema_initialized
-    # Skip schema initialization for health check
-    if request.endpoint == 'health_check':
-        return
-        
-    if not _schema_initialized:
-        print("DEBUG: Inicializando schema no primeiro request...")
-        try:
-            ensure_schema_on_boot()
-            print("DEBUG: Schema inicializado com sucesso!")
-            _schema_initialized = True
-        except Exception as e:
-            print(f"ERRO CRÍTICO na inicialização do schema via before_request: {e}")
-            import traceback
-            traceback.print_exc()
-
-@app.before_request
-def force_login():
-    public_endpoints = {"login", "static", "sem_permissao", "debug", "health_check"}
-    ep = request.endpoint or ""
-    if ep.split(".")[0] in {"static"} or ep in public_endpoints:
-        return
-    if not session.get("user_id"):
-        return redirect(url_for("login", next=request.path))
-
-
